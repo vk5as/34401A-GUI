@@ -50,3 +50,33 @@ python3 -m venv .venv
 
 The coverage gate covers everything except the `gui` package; GUI coverage is still shown in the
 `pytest` report but isn't gated.
+
+## Releasing
+
+Releases are cut by hand from the **Release** workflow (Actions, Release, Run workflow); nothing is released by a
+push or a tag. To release:
+
+1. Bump `version` in `pyproject.toml` (the only place the version lives) and merge it to `main`.
+2. Run the Release workflow on `main`. It refuses to start if the tag `v<version>` already exists.
+3. It runs the static analysis and tests (Linux and Windows), builds the wheel and sdist, runs `twine check` and
+   `check-wheel-contents`, then installs the built wheel into a clean virtual environment on Windows with Python
+   3.11, 3.12, 3.13 and 3.14. There it constructs the GUI against the Simulator and runs `--help` for
+   `agilent34401a-cli` and `agilent34401a-sim`.
+4. Only if every one of those passed does it create the release `v<version>`, with the wheel and sdist attached and
+   generated release notes. Run from any other branch, it executes the gates as a dry run and creates nothing.
+
+The tag name comes from `scripts/release_info.py` (`tag`, `version` and `check-dist` subcommands), so it can't
+drift from `pyproject.toml`.
+
+### PyPI (prepared, not enabled)
+
+`release.yml` contains a `publish-pypi` job using PyPI Trusted Publishing (OpenID Connect, no API token). It is
+switched off with `if: false`, and it is the only job with `id-token: write`. To enable it, register
+`vk5as/34401A-GUI`, workflow `release.yml`, environment `pypi` as a trusted publisher for `agilent34401a` on
+pypi.org, create a `pypi` environment in the repository settings, and change `if: false`; the comments above the
+job list the steps.
+
+### Freezing
+
+The package is kept compatible with freezers such as PyInstaller: it never builds paths from `__file__`, and package
+data (`py.typed`) is reached through `importlib.resources`. `tests/test_freeze_compatibility.py` guards this.

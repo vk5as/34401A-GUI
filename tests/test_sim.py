@@ -649,3 +649,44 @@ def test_commands_that_have_no_answer_leave_no_reply_waiting(command):
     simulator.write(command)
 
     assert not _has_reply(simulator)
+
+
+def _is_remote(simulator: Simulator) -> bool:
+    return simulator.remote  # a function, so the type checker does not assume the answer cannot change
+
+
+def test_the_simulator_is_in_local_until_it_is_commanded_and_goes_remote_on_the_first_command():
+    simulator = Simulator()
+    assert not _is_remote(simulator)
+
+    simulator.query("*IDN?")
+
+    assert _is_remote(simulator)
+
+
+def test_going_to_local_returns_the_simulator_to_local_without_touching_its_setup():
+    simulator = Simulator()
+    simulator.write('FUNC "RES"')
+
+    simulator.go_to_local()
+
+    assert not _is_remote(simulator)
+    assert simulator.query("FUNC?") == '"RES"'
+
+
+def test_going_to_local_gives_the_front_panel_back_even_after_a_lockout():
+    simulator = Simulator()
+    simulator.write("SYST:RWL")
+    assert simulator.front_panel_locked
+
+    simulator.go_to_local()
+
+    assert not simulator.front_panel_locked
+
+
+def test_going_to_local_on_a_closed_simulator_is_refused_like_any_command():
+    simulator = Simulator()
+    simulator.close()
+
+    with pytest.raises(TransportError):
+        simulator.go_to_local()

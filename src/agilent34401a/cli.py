@@ -91,7 +91,7 @@ def run_on_meter(args: argparse.Namespace, action: Callable[[Driver, Transport],
 
     A failure talking to the Meter is printed on stderr and gives exit code 1; the Transport is closed either way.
     """
-    settings = _connection_settings(args, args.parser)
+    settings = connection_settings(args, args.parser)
     try:
         transport = Simulator() if settings is None else open_transport(settings)
     except MeterError as error:
@@ -251,7 +251,7 @@ def _run_log(args: argparse.Namespace) -> int:
     )
 
 
-def _connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ConnectionSettings | None:
+def connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ConnectionSettings | None:
     """Build the Connection settings from the command line, or None when the Simulator was asked for."""
     chosen = {
         "--backend": args.backend,

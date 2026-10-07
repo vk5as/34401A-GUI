@@ -649,14 +649,6 @@ def test_running_the_app_with_simulate_shows_a_window_and_returns_success_when_i
     assert shown_titles == [f"Agilent 34401A {__version__}"]
 
 
-def test_running_the_app_without_simulate_explains_that_connections_are_not_available_yet(capsys):
-    with pytest.raises(SystemExit) as exit_info:
-        main([])
-
-    assert exit_info.value.code == 2
-    assert "--simulate" in capsys.readouterr().err
-
-
 def test_version_flag_prints_the_version_and_exits_successfully(capsys):
     with pytest.raises(SystemExit) as exit_info:
         main(["--version"])

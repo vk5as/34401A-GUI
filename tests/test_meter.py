@@ -1,7 +1,7 @@
 import pytest
 
 from agilent34401a.errors import MalformedReplyError, MeterError
-from agilent34401a.meter import Function, format_reading, parse_reading
+from agilent34401a.meter import Function, Resolution, format_reading, parse_reading
 
 
 def test_reading_parses_a_normal_dc_voltage_reply():
@@ -44,9 +44,36 @@ def test_dc_voltage_reads_in_volts():
     assert Function.DC_VOLTAGE.unit == "V"
 
 
-def _format(value: float, resolution_digits: float = 6.5) -> str:
+@pytest.mark.parametrize(
+    ("function", "raw", "expected"),
+    [
+        (Function.AC_VOLTAGE, "+1.23456789E+00", "1.234568 V"),
+        (Function.DC_CURRENT, "+2.50000000E-03", "2.500000 mA"),
+        (Function.RESISTANCE_2W, "+4.70000000E+03", "4.700000 kΩ"),
+        (Function.RESISTANCE_4W, "+9.99900000E+01", "99.99000 Ω"),
+        (Function.FREQUENCY, "+1.00000000E+03", "1.000000 kHz"),
+        (Function.PERIOD, "+1.00000000E-03", "1.000000 ms"),
+        (Function.DIODE, "+5.80000000E-01", "580.0000 mV"),
+        (Function.CONTINUITY, "+1.20000000E+01", "12.00000 Ω"),
+    ],
+)
+def test_every_function_is_shown_with_its_own_unit(function, raw, expected):
+    assert format_reading(parse_reading(raw, function)) == expected
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("+1.23456789E+00", "1.234568"), ("+5.00000000E-01", "0.500000")])
+def test_a_ratio_is_shown_without_a_unit_or_prefix(raw, expected):
+    assert format_reading(parse_reading(raw, Function.DC_VOLTAGE_RATIO)) == expected
+
+
+@pytest.mark.parametrize("function", list(Function))
+def test_overload_is_shown_as_ovld_for_every_function(function):
+    assert format_reading(parse_reading("+9.90000000E+37", function)) == "OVLD"
+
+
+def _format(value: float, resolution: Resolution = Resolution.SIX_HALF) -> str:
     reading = parse_reading(f"{value:+.8E}", Function.DC_VOLTAGE)
-    return format_reading(reading, resolution_digits)
+    return format_reading(reading, resolution)
 
 
 @pytest.mark.parametrize(
@@ -73,11 +100,11 @@ def test_reading_that_rounds_up_to_the_next_prefix_is_shown_with_that_prefix():
 
 
 @pytest.mark.parametrize(
-    ("resolution_digits", "expected"),
-    [(6.5, "1.234568 V"), (5.5, "1.23457 V"), (4.5, "1.2346 V")],
+    ("resolution", "expected"),
+    [(Resolution.SIX_HALF, "1.234568 V"), (Resolution.FIVE_HALF, "1.23457 V"), (Resolution.FOUR_HALF, "1.2346 V")],
 )
-def test_resolution_sets_the_number_of_digits_shown(resolution_digits, expected):
-    assert _format(1.23456789, resolution_digits) == expected
+def test_resolution_sets_the_number_of_digits_shown(resolution, expected):
+    assert _format(1.23456789, resolution) == expected
 
 
 @pytest.mark.parametrize("raw", ["+9.90000000E+37", "-9.90000000E+37"])

@@ -5,15 +5,20 @@ from collections.abc import Callable
 
 import pytest
 
+from agilent34401a.driver import QueuedError
 from agilent34401a.errors import TransportError
+from agilent34401a.meter import Function, Resolution, Setup, reading_timeout
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
     Disconnected,
+    ErrorsReported,
     Event,
     ReadingFailed,
     ReadingTaken,
+    SetupChanged,
+    SetupFailed,
     Worker,
     WorkerFailed,
 )
@@ -31,8 +36,20 @@ class HookedSimulator(Simulator):
         self.clears = 0
         self.before_reading: Callable[[int], None] = lambda _count: None
         self.garbage_on: set[int] = set()
+        self.writes: list[str] = []
+        self.refuse_ranges_of: str | None = None
+        self.garbage_function = False
+
+    def write(self, command: str) -> None:
+        self.writes.append(command)
+        if self.refuse_ranges_of and not command.endswith("?") and command.startswith(f"{self.refuse_ranges_of}:RANG"):
+            self._errors.append('-222,"Data out of range"')
+            return
+        super().write(command)
 
     def query(self, command: str) -> str:
+        if command == "FUNC?" and self.garbage_function:
+            return "garbage"
         if command == "READ?":
             self.reads += 1
             self.before_reading(self.reads)
@@ -97,6 +114,7 @@ def test_worker_identifies_the_meter_on_connect_and_waits_for_a_request_before_r
 
     assert isinstance(event, Connected)
     assert event.identity.manufacturer == "Agilent Technologies"
+    assert event.setup == Setup.default(Function.DC_VOLTAGE)
     time.sleep(0.05)
     assert events.empty()
     assert simulator.reads == 0
@@ -280,8 +298,7 @@ def test_a_malformed_reply_is_reported_and_the_connection_resynchronised_without
 
 
 def test_a_reading_that_times_out_is_reported_and_the_worker_carries_on(started):
-    simulator = HookedSimulator(time_scale=1, sleep=lambda _seconds: None)
-    simulator.timeout = 0.1
+    simulator = HookedSimulator(time_scale=100, sleep=lambda _seconds: None)  # 40 s per Reading, beyond any timeout
     worker, events = started(simulator)
     next_event(events)
 
@@ -324,3 +341,145 @@ def test_a_transport_failure_while_reading_ends_the_worker_loudly(started):
     seen = collect_until(events, lambda event: isinstance(event, Disconnected))
 
     assert isinstance(seen[0], WorkerFailed)
+
+
+def test_connecting_reads_the_setup_back_without_changing_the_meter(started):
+    simulator = HookedSimulator()
+    simulator.write('FUNC "RES"')
+    simulator.write("RES:RANG 1000")
+    simulator.write("RES:NPLC 1")
+    simulator.writes.clear()
+    _worker, events = started(simulator)
+
+    connected = next_event(events)
+
+    assert isinstance(connected, Connected)
+    assert connected.setup == Setup.default(Function.RESISTANCE_2W).with_range(1000.0).with_nplc(1)
+    assert all(command.endswith("?") for command in simulator.writes)
+
+
+def test_a_meter_whose_setup_cannot_be_understood_fails_the_connection(started):
+    simulator = HookedSimulator()
+    simulator.garbage_function = True
+    _worker, events = started(simulator)
+
+    failed = next_event(events)
+
+    assert isinstance(failed, ConnectionFailed)
+    assert "garbage" in failed.message
+
+
+def test_the_timeout_is_calculated_from_the_setup_the_meter_is_in(started):
+    simulator = HookedSimulator()
+    _worker, events = started(simulator)
+
+    next_event(events)
+
+    assert simulator.timeout == reading_timeout(Setup.default(Function.DC_VOLTAGE))
+
+
+def test_applying_a_setup_reports_the_setup_the_meter_ended_up_in_and_readings_follow_it(started):
+    simulator = HookedSimulator(signals={Function.AC_VOLTAGE: 2.0})
+    worker, events = started(simulator)
+    next_event(events)
+    setup = Setup.default(Function.AC_VOLTAGE).with_range(10.0)
+
+    worker.apply_setup(setup)
+    worker.start_continuous()
+
+    changed = next_event(events)
+    assert changed == SetupChanged(setup)
+    reading = next_reading(events)
+    assert reading.reading.function is Function.AC_VOLTAGE
+    assert reading.reading.value == pytest.approx(2.0)
+    assert reading.setup == setup
+
+
+def test_a_setup_can_be_applied_while_continuous_is_running(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    worker.start_continuous()
+    next_reading(events)
+    setup = Setup.default(Function.DC_VOLTAGE).with_range(1.0).with_resolution(Resolution.FIVE_HALF)
+
+    worker.apply_setup(setup)
+
+    seen = collect_until(events, lambda event: isinstance(event, ReadingTaken) and event.setup == setup)
+    assert SetupChanged(setup) in seen
+
+
+def test_the_timeout_grows_with_the_integration_time_so_slow_readings_do_not_time_out(started):
+    simulator = HookedSimulator(time_scale=1, sleep=lambda _seconds: None)  # 100 NPLC takes 4 s, beyond the 2 s default
+    worker, events = started(simulator)
+    next_event(events)
+    slow = Setup.default(Function.DC_VOLTAGE).with_nplc(100)
+
+    worker.apply_setup(slow)
+    worker.start_continuous()
+
+    assert next_event(events) == SetupChanged(slow)
+    assert simulator.timeout == reading_timeout(slow)
+    assert simulator.timeout > 4.0
+    assert isinstance(next_event(events), ReadingTaken)
+
+
+def test_errors_the_meter_queues_after_a_setup_change_are_reported_with_the_setup_it_kept(started):
+    simulator = HookedSimulator()
+    simulator.refuse_ranges_of = "VOLT:AC"
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.apply_setup(Setup.default(Function.AC_VOLTAGE).with_range(10.0))
+
+    assert next_event(events) == SetupChanged(Setup.default(Function.AC_VOLTAGE))
+    assert next_event(events) == ErrorsReported((QueuedError(-222, "Data out of range"),))
+
+
+def test_a_setup_change_that_succeeds_reports_no_errors(started):
+    worker, events = started(HookedSimulator())
+    next_event(events)
+
+    worker.apply_setup(Setup.default(Function.DIODE))
+
+    assert isinstance(next_event(events), SetupChanged)
+    time.sleep(0.05)
+    assert events.empty()
+
+
+def test_a_setup_change_the_worker_cannot_confirm_is_reported_and_the_worker_carries_on(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    simulator.garbage_function = True
+
+    worker.apply_setup(Setup.default(Function.DIODE))
+    failed = next_event(events)
+
+    assert isinstance(failed, SetupFailed)
+    assert "garbage" in failed.message
+    assert simulator.clears == 1
+    simulator.garbage_function = False
+    worker.start_continuous()
+    assert isinstance(next_event(events), ReadingTaken)
+
+
+def test_selecting_a_function_keeps_its_own_settings_and_reports_the_setup(started):
+    simulator = HookedSimulator(signals={Function.RESISTANCE_2W: 4700.0})
+    simulator.write('FUNC "RES"')
+    simulator.write("RES:RANG 10000")
+    simulator.write("RES:NPLC 1")
+    simulator.write('FUNC "VOLT"')
+    worker, events = started(simulator)
+    next_event(events)
+    simulator.writes.clear()
+
+    worker.select_function(Function.RESISTANCE_2W)
+    worker.start_continuous()
+
+    expected = Setup.default(Function.RESISTANCE_2W).with_range(1e4).with_nplc(1)
+    assert next_event(events) == SetupChanged(expected)
+    reading = next_reading(events)
+    assert reading.reading.function is Function.RESISTANCE_2W
+    assert reading.setup == expected
+    assert [command for command in simulator.writes if not command.endswith("?")] == ['FUNC "RES"']

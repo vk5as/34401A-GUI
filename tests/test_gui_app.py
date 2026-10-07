@@ -4,6 +4,7 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
+from tkinter import ttk
 
 import pytest
 
@@ -11,6 +12,7 @@ from agilent34401a import __version__
 from agilent34401a.errors import TransportError
 from agilent34401a.gui.app import create_window, main
 from agilent34401a.gui.main_window import NO_READING, MainWindow
+from agilent34401a.meter import Function, Resolution
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.transport import Transport
 
@@ -25,8 +27,18 @@ class CountingSimulator(Simulator):
         self.reads = 0
         self.garbage_on: set[int] = set()
         self.hold_reading: tuple[int, threading.Event] | None = None
+        self.refuse_ranges_of: str | None = None
+        self.garbage_function = False
+
+    def write(self, command: str) -> None:
+        if self.refuse_ranges_of and not command.endswith("?") and command.startswith(f"{self.refuse_ranges_of}:RANG"):
+            self._errors.append('-222,"Data out of range"')
+            return
+        super().write(command)
 
     def query(self, command: str) -> str:
+        if command == "FUNC?" and self.garbage_function:
+            return "garbage"
         if command == "READ?":
             self.reads += 1
             if self.hold_reading and self.hold_reading[0] == self.reads:
@@ -99,12 +111,12 @@ def test_continuous_readings_update_the_readout_as_soon_as_the_window_is_connect
 
     pump(window, lambda: window.readout.cget("text") != NO_READING)
 
-    assert window.readout.cget("text") == "1.234567 V"
+    assert window.readout.cget("text") == "1.234570 V"
     assert window.function_label.cget("text") == "DC V"
 
 
 def test_an_overload_reading_is_shown_as_ovld(make_window):
-    window = make_window(Simulator(dc_voltage=-500.0))
+    window = make_window(Simulator(dc_voltage=-5000.0))
 
     pump(window, lambda: window.readout.cget("text") != NO_READING)
 
@@ -231,6 +243,351 @@ def test_an_unexpected_worker_failure_is_reported_and_stops_the_readings(make_wi
 
     assert "boom" in window.status_connection.cget("text")
     assert str(window.run_button.cget("state")) == "disabled"
+
+
+def choose(window: MainWindow, box: ttk.Combobox, label: str) -> None:
+    """Pick an entry in a combobox the way a user would."""
+    box.set(label)
+    box.event_generate("<<ComboboxSelected>>")
+    window.root.update()
+
+
+def shows_reading(window: MainWindow) -> bool:
+    return str(window.readout.cget("text")) != NO_READING
+
+
+FUNCTION_LABELS = [
+    (Function.DC_VOLTAGE, "DC V"),
+    (Function.AC_VOLTAGE, "AC V"),
+    (Function.DC_CURRENT, "DC I"),
+    (Function.AC_CURRENT, "AC I"),
+    (Function.RESISTANCE_2W, "2-wire Ω"),
+    (Function.RESISTANCE_4W, "4-wire Ω"),
+    (Function.FREQUENCY, "Frequency"),
+    (Function.PERIOD, "Period"),
+    (Function.CONTINUITY, "Continuity"),
+    (Function.DIODE, "Diode"),
+    (Function.DC_VOLTAGE_RATIO, "DC V ratio"),
+]
+
+
+def test_there_is_a_button_for_every_function(make_window):
+    window = make_window()
+
+    assert [(function, button.cget("text")) for function, button in window.function_buttons.items()] == FUNCTION_LABELS
+
+
+@pytest.mark.parametrize(
+    ("function", "expected"),
+    [
+        (Function.DC_VOLTAGE, "1.000000 V"),
+        (Function.AC_VOLTAGE, "1.000000 V"),
+        (Function.DC_CURRENT, "1.000000 mA"),
+        (Function.AC_CURRENT, "1.000000 mA"),
+        (Function.RESISTANCE_2W, "1.000000 kΩ"),
+        (Function.RESISTANCE_4W, "1.000000 kΩ"),
+        (Function.FREQUENCY, "1.00000 kHz"),
+        (Function.PERIOD, "1.00000 ms"),
+        (Function.CONTINUITY, "500.000 mΩ"),
+        (Function.DIODE, "600.000 mV"),
+        (Function.DC_VOLTAGE_RATIO, "1.000000"),
+    ],
+)
+def test_choosing_a_function_shows_its_readings_with_the_right_unit(make_window, function, expected):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+
+    window.function_buttons[function].invoke()
+
+    pump(
+        window, lambda: window.function_label.cget("text") == function.label and window.readout.cget("text") == expected
+    )
+
+
+def test_the_readout_describes_the_setup_it_is_measuring(make_window):
+    window = make_window()
+
+    pump(window, lambda: shows_reading(window))
+    assert window.setup_label.cget("text") == "DC V · Autorange · 6½ digits · 10 NPLC"
+
+    window.function_buttons[Function.RESISTANCE_4W].invoke()
+    pump(window, lambda: window.function_label.cget("text") == "4-wire Ω")
+
+    assert window.setup_label.cget("text") == "4-wire Ω · Autorange · 6½ digits · 10 NPLC"
+
+
+def test_the_range_box_offers_only_the_ranges_of_the_current_function(make_window):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    assert tuple(window.range_box.cget("values")) == ("Auto", "100 mV", "1 V", "10 V", "100 V", "1 kV")
+
+    window.function_buttons[Function.DC_CURRENT].invoke()
+    pump(window, lambda: window.function_label.cget("text") == "DC I")
+    assert tuple(window.range_box.cget("values")) == ("Auto", "10 mA", "100 mA", "1 A", "3 A")
+
+    window.function_buttons[Function.AC_CURRENT].invoke()
+    pump(window, lambda: window.function_label.cget("text") == "AC I")
+    assert tuple(window.range_box.cget("values")) == ("Auto", "1 A", "3 A")
+
+
+def test_choosing_a_fixed_range_applies_it_and_an_overload_shows_as_ovld(make_window):
+    window = make_window(Simulator(dc_voltage=5.0))
+    pump(window, lambda: window.readout.cget("text") == "5.000000 V")
+
+    choose(window, window.range_box, "1 V")
+
+    pump(window, lambda: window.readout.cget("text") == "OVLD")
+    assert window.setup_label.cget("text") == "DC V · 1 V range · 6½ digits · 10 NPLC"
+
+    choose(window, window.range_box, "10 V")
+    pump(window, lambda: window.readout.cget("text") == "5.000000 V")
+    choose(window, window.range_box, "Auto")
+    pump(window, lambda: "Autorange" in window.setup_label.cget("text"))
+
+
+def test_choosing_a_resolution_sets_the_digits_shown_and_the_integration_time(make_window):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    assert tuple(window.resolution_box.cget("values")) == tuple(resolution.label for resolution in Resolution)
+
+    choose(window, window.resolution_box, "4½ digits")
+
+    pump(window, lambda: window.readout.cget("text") == "1.0000 V")
+    assert window.nplc_box.get() == "0.02 NPLC"
+    assert window.setup_label.cget("text") == "DC V · Autorange · 4½ digits · 0.02 NPLC"
+
+
+def test_choosing_an_integration_time_decides_the_resolution(make_window):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    assert tuple(window.nplc_box.cget("values")) == ("0.02 NPLC", "0.2 NPLC", "1 NPLC", "10 NPLC", "100 NPLC")
+
+    choose(window, window.nplc_box, "0.2 NPLC")
+
+    pump(window, lambda: window.readout.cget("text") == "1.00000 V")
+    assert window.resolution_box.get() == "5½ digits"
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        Function.AC_VOLTAGE,
+        Function.AC_CURRENT,
+        Function.FREQUENCY,
+        Function.PERIOD,
+        Function.CONTINUITY,
+        Function.DIODE,
+    ],
+)
+def test_integration_time_is_disabled_for_functions_that_have_none(make_window, function):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    assert str(window.nplc_box.cget("state")) == "readonly"
+
+    window.function_buttons[function].invoke()
+    pump(window, lambda: window.function_label.cget("text") == function.label)
+
+    assert str(window.nplc_box.cget("state")) == "disabled"
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        Function.AC_VOLTAGE,
+        Function.AC_CURRENT,
+        Function.FREQUENCY,
+        Function.PERIOD,
+        Function.CONTINUITY,
+        Function.DIODE,
+    ],
+)
+def test_resolution_is_disabled_for_functions_that_measure_at_a_fixed_one(make_window, function):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    assert str(window.resolution_box.cget("state")) == "readonly"
+
+    window.function_buttons[function].invoke()
+    pump(window, lambda: window.function_label.cget("text") == function.label)
+
+    assert str(window.resolution_box.cget("state")) == "disabled"
+    assert window.resolution_box.get() == function.fixed_resolution.label
+
+
+@pytest.mark.parametrize("function", [Function.CONTINUITY, Function.DIODE])
+def test_range_is_disabled_for_functions_with_a_fixed_range(make_window, function):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+
+    window.function_buttons[function].invoke()
+    pump(window, lambda: window.function_label.cget("text") == function.label)
+
+    assert str(window.range_box.cget("state")) == "disabled"
+
+
+def test_the_raw_reading_toggle_shows_exactly_what_the_meter_returned(make_window):
+    window = make_window(Simulator(dc_voltage=1.5))
+    pump(window, lambda: window.readout.cget("text") == "1.500000 V")
+
+    window.raw_check.invoke()
+    pump(window, lambda: window.readout.cget("text") == "+1.50000000E+00")
+
+    window.raw_check.invoke()
+    pump(window, lambda: window.readout.cget("text") == "1.500000 V")
+
+
+def test_an_overload_stays_ovld_until_the_raw_toggle_is_used(make_window):
+    window = make_window(Simulator(dc_voltage=5000.0))
+    pump(window, lambda: window.readout.cget("text") == "OVLD")
+
+    window.raw_check.invoke()
+
+    pump(window, lambda: window.readout.cget("text") == "+9.90000000E+37")
+
+
+def test_connecting_shows_the_setup_the_meter_was_already_in_without_changing_it(make_window):
+    simulator = CountingSimulator()
+    simulator.write('FUNC "FRES"')
+    simulator.write("FRES:RANG 1000")
+    simulator.write("FRES:NPLC 1")
+    window = make_window(simulator)
+
+    pump(window, lambda: shows_reading(window))
+
+    assert window.setup_label.cget("text") == "4-wire Ω · 1 kΩ range · 5½ digits · 1 NPLC"
+    assert window.range_box.get() == "1 kΩ"
+    assert window.resolution_box.get() == "5½ digits"
+    assert window.nplc_box.get() == "1 NPLC"
+    assert window._function_var.get() == Function.RESISTANCE_4W.value
+
+
+def test_the_controls_are_unavailable_until_the_meter_is_connected_and_after_a_failure(make_window):
+    def refuse():
+        message = "no such resource"
+        raise TransportError(message)
+
+    window = make_window(opener=refuse)
+    window.root.update()
+    pump(window, lambda: window.status_connection.cget("text").startswith("Connection failed"))
+
+    for button in window.function_buttons.values():
+        assert str(button.cget("state")) == "disabled"
+    for box in (window.range_box, window.resolution_box, window.nplc_box):
+        assert str(box.cget("state")) == "disabled"
+
+
+def test_errors_the_meter_queues_after_a_change_appear_in_the_status_bar_and_the_actual_setup_is_shown(make_window):
+    simulator = CountingSimulator(dc_voltage=1.0)
+    simulator.refuse_ranges_of = "VOLT:DC"
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+
+    choose(window, window.range_box, "10 V")
+
+    pump(window, lambda: "-222" in window.status_error.cget("text"))
+    assert "Data out of range" in window.status_error.cget("text")
+    pump(window, lambda: window.range_box.get() == "Auto")
+
+
+def test_the_error_is_cleared_by_the_next_successful_change(make_window):
+    simulator = CountingSimulator()
+    simulator.refuse_ranges_of = "VOLT:DC"
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+    choose(window, window.range_box, "10 V")
+    pump(window, lambda: "-222" in window.status_error.cget("text"))
+
+    simulator.refuse_ranges_of = None
+    choose(window, window.range_box, "10 V")
+
+    pump(window, lambda: window.status_error.cget("text") == "")
+    assert window.range_box.get() == "10 V"
+
+
+def settle(window: MainWindow, simulator: CountingSimulator) -> None:
+    """Pump until the Worker has stopped taking Readings."""
+    while True:
+        before = simulator.reads
+        pump_for(window, 0.1)
+        if simulator.reads == before:
+            return
+
+
+def test_switching_function_clears_the_old_reading_until_the_new_function_has_one(make_window):
+    simulator = CountingSimulator()
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+    window.run_button.invoke()  # pause
+    settle(window, simulator)
+    release = threading.Event()
+    simulator.hold_reading = (simulator.reads + 1, release)
+
+    window.function_buttons[Function.RESISTANCE_2W].invoke()
+    pump(window, lambda: window.function_label.cget("text") == "2-wire Ω")
+    assert window.readout.cget("text") == NO_READING
+
+    window.run_button.invoke()
+    pump_for(window, 0.2)
+    assert window.readout.cget("text") == NO_READING
+    release.set()
+
+    pump(window, lambda: window.readout.cget("text") == "1.000000 kΩ")
+
+
+def test_switching_function_keeps_the_settings_the_meter_holds_for_each_function(make_window):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    choose(window, window.range_box, "10 V")
+    pump(window, lambda: "10 V range" in window.setup_label.cget("text"))
+
+    window.function_buttons[Function.RESISTANCE_2W].invoke()
+    pump(window, lambda: window.setup_label.cget("text") == "2-wire Ω · Autorange · 6½ digits · 10 NPLC")
+    window.function_buttons[Function.DC_VOLTAGE].invoke()
+
+    pump(window, lambda: window.setup_label.cget("text") == "DC V · 10 V range · 6½ digits · 10 NPLC")
+
+
+def test_controls_are_locked_while_a_change_is_with_the_meter_so_two_changes_cannot_clash(make_window):
+    simulator = CountingSimulator()
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+    release = threading.Event()
+    stuck_at = simulator.reads + 5
+    simulator.hold_reading = (stuck_at, release)
+    pump(window, lambda: simulator.reads >= stuck_at)  # the Worker is now stuck in a Reading
+
+    choose(window, window.range_box, "10 V")
+    assert str(window.range_box.cget("state")) == "disabled"
+    assert str(window.resolution_box.cget("state")) == "disabled"
+    assert str(window.function_buttons[Function.DIODE].cget("state")) == "disabled"
+    choose(window, window.resolution_box, "5½ digits")  # ignored: the controls are locked
+    release.set()
+
+    pump(window, lambda: window.setup_label.cget("text") == "DC V · 10 V range · 6½ digits · 10 NPLC")
+    assert str(window.range_box.cget("state")) == "readonly"
+    assert str(window.function_buttons[Function.DIODE].cget("state")) == "normal"
+
+
+def test_a_change_the_worker_could_not_confirm_puts_the_controls_back_to_what_the_meter_reported(make_window):
+    simulator = CountingSimulator()
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+    simulator.garbage_function = True
+
+    window.function_buttons[Function.DIODE].invoke()
+
+    pump(window, lambda: "Setup change failed" in window.status_error.cget("text"))
+    assert window._function_var.get() == Function.DC_VOLTAGE.value
+    assert window.function_label.cget("text") == "DC V"
+    assert str(window.range_box.cget("state")) == "readonly"
+
+
+def test_a_reading_is_shown_with_the_resolution_it_was_taken_at(make_window):
+    window = make_window(Simulator(dc_voltage=1.23456789))
+    pump(window, lambda: window.readout.cget("text") == "1.234570 V")
+
+    choose(window, window.resolution_box, "5½ digits")
+
+    pump(window, lambda: window.readout.cget("text") == "1.23460 V")
 
 
 def test_closing_the_window_shuts_the_worker_down_and_closes_the_transport(make_window):

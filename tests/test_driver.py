@@ -1,8 +1,8 @@
 import pytest
 
-from agilent34401a.driver import Driver, Identity
+from agilent34401a.driver import Driver, Identity, QueuedError
 from agilent34401a.errors import MalformedReplyError, UnrecognisedIdentityError
-from agilent34401a.meter import Function
+from agilent34401a.meter import Function, Resolution, Setup
 from agilent34401a.sim import AGILENT_IDENTITY, HEWLETT_PACKARD_IDENTITY, Simulator
 
 
@@ -81,15 +81,15 @@ def test_driver_identity_check_ignores_case_and_padding():
 
 
 def test_driver_reads_a_dc_voltage_reading_with_its_raw_reading():
-    reading = Driver(Simulator(dc_voltage=1.234567)).read()
+    reading = Driver(Simulator(dc_voltage=1.23457)).read()
 
     assert reading.function is Function.DC_VOLTAGE
-    assert reading.value == pytest.approx(1.234567)
-    assert reading.raw == "+1.23456700E+00"
+    assert reading.value == pytest.approx(1.23457)
+    assert reading.raw == "+1.23457000E+00"
 
 
 def test_driver_reports_an_overload_reading():
-    reading = Driver(Simulator(dc_voltage=-500.0)).read()
+    reading = Driver(Simulator(dc_voltage=-5000.0)).read()
 
     assert reading.is_overload is True
     assert reading.value < 0
@@ -106,3 +106,276 @@ def test_driver_asks_the_meter_for_a_reading_with_read_query():
 def test_driver_rejects_a_malformed_reading():
     with pytest.raises(MalformedReplyError):
         Driver(ScriptedTransport("not a number")).read()
+
+
+class RecordingTransport:
+    """Passes everything through to a Simulator and remembers what was written."""
+
+    timeout = 1.0
+
+    def __init__(self, simulator: Simulator) -> None:
+        self._simulator = simulator
+        self.commands: list[str] = []
+
+    def write(self, command: str) -> None:
+        self.commands.append(command)
+        self._simulator.write(command)
+
+    def read(self) -> str:
+        return self._simulator.read()
+
+    def query(self, command: str) -> str:
+        self.write(command)
+        return self.read()
+
+    def clear(self) -> None:
+        self._simulator.clear()
+
+    def close(self) -> None:
+        self._simulator.close()
+
+
+class AnswersInOrder(ScriptedTransport):
+    """A Transport whose replies come from a script, one per read."""
+
+    def __init__(self, *replies: str) -> None:
+        super().__init__("")
+        self._script = list(replies)
+
+    def read(self) -> str:
+        return self._script.pop(0) if self._script else self._reply
+
+
+ALL_FUNCTIONS = list(Function)
+
+
+def test_a_new_driver_assumes_the_setup_of_a_freshly_reset_meter():
+    assert Driver(Simulator()).setup == Setup.default(Function.DC_VOLTAGE)
+
+
+@pytest.mark.parametrize("function", ALL_FUNCTIONS)
+def test_every_function_can_be_applied_and_read_back_from_the_meter(function):
+    driver = Driver(Simulator())
+
+    errors = driver.apply(Setup.default(function))
+
+    assert errors == []
+    assert driver.read_setup() == Setup.default(function)
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [Setup.default(function).with_range(range_value) for function in ALL_FUNCTIONS for range_value in function.ranges],
+)
+def test_every_range_can_be_applied_and_read_back(setup):
+    driver = Driver(Simulator())
+
+    assert driver.apply(setup) == []
+    assert driver.read_setup() == setup
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        Setup.default(function).with_nplc(nplc)
+        for function in ALL_FUNCTIONS
+        if function.has_integration_time
+        for nplc in (0.02, 0.2, 1, 10, 100)
+    ],
+)
+def test_every_integration_time_can_be_applied_and_read_back(setup):
+    driver = Driver(Simulator())
+
+    assert driver.apply(setup) == []
+    assert driver.read_setup() == setup
+
+
+def test_applying_a_resolution_reads_back_as_the_integration_time_that_goes_with_it():
+    driver = Driver(Simulator())
+
+    driver.apply(Setup.default(Function.RESISTANCE_4W).with_resolution(Resolution.FIVE_HALF))
+
+    assert driver.read_setup().nplc == 1
+
+
+def test_apply_sends_function_then_range_then_integration_time_then_checks_the_error_queue():
+    transport = RecordingTransport(Simulator())
+
+    Driver(transport).apply(Setup.default(Function.DC_VOLTAGE).with_range(10.0).with_nplc(1))
+
+    assert transport.commands == ['FUNC "VOLT:DC"', "VOLT:DC:RANG 10", "VOLT:DC:NPLC 1", "SYST:ERR?"]
+
+
+def test_apply_switches_autorange_on_rather_than_sending_a_range():
+    transport = RecordingTransport(Simulator())
+
+    Driver(transport).apply(Setup.default(Function.AC_CURRENT))
+
+    assert transport.commands == ['FUNC "CURR:AC"', "CURR:AC:RANG:AUTO ON", "SYST:ERR?"]
+
+
+@pytest.mark.parametrize(
+    ("function", "commands"),
+    [
+        (Function.CONTINUITY, ['FUNC "CONT"', "SYST:ERR?"]),
+        (Function.DIODE, ['FUNC "DIOD"', "SYST:ERR?"]),
+        (Function.FREQUENCY, ['FUNC "FREQ"', "FREQ:VOLT:RANG:AUTO ON", "SYST:ERR?"]),
+        (Function.PERIOD, ['FUNC "PER"', "PER:VOLT:RANG:AUTO ON", "SYST:ERR?"]),
+        (Function.RESISTANCE_4W, ['FUNC "FRES"', "FRES:RANG:AUTO ON", "FRES:NPLC 10", "SYST:ERR?"]),
+        (Function.DC_VOLTAGE_RATIO, ['FUNC "VOLT:DC:RAT"', "VOLT:DC:RANG:AUTO ON", "VOLT:DC:NPLC 10", "SYST:ERR?"]),
+    ],
+)
+def test_apply_only_sends_the_settings_a_function_has(function, commands):
+    transport = RecordingTransport(Simulator())
+
+    Driver(transport).apply(Setup.default(function))
+
+    assert transport.commands == commands
+
+
+def test_apply_reports_every_error_the_meter_queued_and_stops_at_the_empty_queue():
+    transport = AnswersInOrder('-222,"Data out of range"', '-113,"Undefined header"', '+0,"No error"', "unused")
+
+    errors = Driver(transport).apply(Setup.default(Function.DIODE))
+
+    assert errors == [QueuedError(-222, "Data out of range"), QueuedError(-113, "Undefined header")]
+    assert transport.commands.count("SYST:ERR?") == 3
+
+
+def test_apply_makes_the_driver_read_in_the_new_function():
+    driver = Driver(Simulator(signals={Function.RESISTANCE_2W: 4700.0}))
+
+    driver.apply(Setup.default(Function.RESISTANCE_2W))
+    reading = driver.read()
+
+    assert reading.function is Function.RESISTANCE_2W
+    assert reading.value == pytest.approx(4700.0)
+    assert driver.setup == Setup.default(Function.RESISTANCE_2W)
+
+
+def test_read_setup_makes_the_driver_read_in_the_functions_the_meter_is_in():
+    simulator = Simulator(signals={Function.PERIOD: 0.002})
+    simulator.write('FUNC "PER"')
+    driver = Driver(simulator)
+
+    driver.read_setup()
+
+    assert driver.read().function is Function.PERIOD
+
+
+def test_read_setup_changes_nothing_on_the_meter():
+    simulator = Simulator()
+    simulator.write('FUNC "RES"')
+    simulator.write("RES:RANG 1000")
+    transport = RecordingTransport(simulator)
+
+    Driver(transport).read_setup()
+
+    assert all(command.endswith("?") for command in transport.commands)
+    assert simulator.query("FUNC?") == '"RES"'
+    assert simulator.query("SYST:ERR?") == '+0,"No error"'
+
+
+def test_drain_errors_empties_the_meters_error_queue():
+    simulator = Simulator()
+    simulator.write("BOGUS")
+    simulator.write("ALSO:BOGUS")
+    driver = Driver(simulator)
+
+    assert [error.code for error in driver.drain_errors()] == [-113, -113]
+    assert driver.drain_errors() == []
+
+
+def test_drain_errors_gives_up_after_the_most_the_meters_queue_can_hold():
+    transport = ScriptedTransport('-113,"Undefined header"')
+
+    errors = Driver(transport).drain_errors()
+
+    assert len(errors) == 20
+
+
+@pytest.mark.parametrize("reply", ["", "garbage", 'x,"y"', "+0"])
+def test_drain_errors_rejects_a_reply_that_is_not_an_error_entry(reply):
+    with pytest.raises(MalformedReplyError):
+        Driver(ScriptedTransport(reply)).drain_errors()
+
+
+@pytest.mark.parametrize("reply", ['"BOGUS"', '"VOLT:FOO"', "", "7"])
+def test_read_setup_rejects_a_function_it_does_not_know(reply):
+    with pytest.raises(MalformedReplyError):
+        Driver(ScriptedTransport(reply)).read_setup()
+
+
+@pytest.mark.parametrize("reply", ['"VOLT"', "VOLT", '"volt"', '"VOLT:DC"', ' "VOLT"\r\n'])
+def test_read_setup_understands_the_forms_the_meter_may_name_dc_voltage_in(reply):
+    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01")).read_setup()
+
+    assert setup.function is Function.DC_VOLTAGE
+
+
+def test_read_setup_rejects_a_range_the_function_does_not_have():
+    transport = AnswersInOrder('"VOLT"', "0", "+5.00000000E+00")
+
+    with pytest.raises(MalformedReplyError, match="Range"):
+        Driver(transport).read_setup()
+
+
+def test_read_setup_rejects_an_integration_time_the_meter_cannot_have():
+    transport = AnswersInOrder('"VOLT"', "1", "+7.00000000E+00")
+
+    with pytest.raises(MalformedReplyError, match="Integration Time"):
+        Driver(transport).read_setup()
+
+
+@pytest.mark.parametrize("auto_reply", ["maybe", ""])
+def test_read_setup_rejects_an_autorange_flag_it_cannot_read(auto_reply):
+    with pytest.raises(MalformedReplyError):
+        Driver(AnswersInOrder('"VOLT"', auto_reply)).read_setup()
+
+
+def test_the_setup_the_driver_assumes_survives_an_apply_the_meter_rejected_until_it_is_read_back():
+    driver = Driver(AnswersInOrder('-222,"Data out of range"', '+0,"No error"'))
+
+    errors = driver.apply(Setup.default(Function.DIODE))
+
+    assert len(errors) == 1
+    assert driver.setup.function is Function.DIODE
+
+
+@pytest.mark.parametrize("number", ["abc", "nan", ""])
+def test_read_setup_rejects_a_range_or_integration_time_that_is_not_a_number(number):
+    with pytest.raises(MalformedReplyError, match="not a number"):
+        Driver(AnswersInOrder('"VOLT"', "0", number)).read_setup()
+    with pytest.raises(MalformedReplyError, match="not a number"):
+        Driver(AnswersInOrder('"VOLT"', "1", number)).read_setup()
+
+
+def test_select_function_sends_only_the_function_and_checks_the_error_queue():
+    transport = RecordingTransport(Simulator())
+
+    errors = Driver(transport).select_function(Function.RESISTANCE_2W)
+
+    assert errors == []
+    assert transport.commands == ['FUNC "RES"', "SYST:ERR?"]
+
+
+def test_select_function_leaves_the_settings_the_meter_keeps_for_that_function():
+    simulator = Simulator()
+    simulator.write('FUNC "RES"')
+    simulator.write("RES:RANG 10000")
+    simulator.write("RES:NPLC 100")
+    simulator.write('FUNC "VOLT"')
+    driver = Driver(simulator)
+
+    driver.select_function(Function.RESISTANCE_2W)
+
+    assert driver.read_setup() == Setup.default(Function.RESISTANCE_2W).with_range(1e4).with_nplc(100)
+
+
+def test_select_function_makes_the_driver_read_in_that_function_and_reports_errors():
+    driver = Driver(AnswersInOrder('-224,"Illegal parameter value"', '+0,"No error"'))
+
+    errors = driver.select_function(Function.PERIOD)
+
+    assert errors == [QueuedError(-224, "Illegal parameter value")]
+    assert driver.setup.function is Function.PERIOD

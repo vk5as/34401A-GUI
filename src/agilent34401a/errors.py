@@ -19,3 +19,7 @@ class MalformedReplyError(MeterError):
 
 class UnrecognisedIdentityError(MeterError):
     """The device that answered `*IDN?` is not a 34401A."""
+
+
+class InvalidSetupError(ValueError):
+    """A Setup the Meter could never hold, such as a Range the Function does not have."""

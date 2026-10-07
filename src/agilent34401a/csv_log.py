@@ -119,6 +119,10 @@ class CsvWriter:
         stream = path.open("w", encoding=_ENCODING, newline="")
         return cls(cast("TextIO", stream), path=path, owns_stream=True)
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def write(self, item: LoggedReading) -> None:
         """Append one row and push it to the file."""
         if self._closed:
@@ -172,3 +176,45 @@ def export_history(history: History, path: Path) -> int:
             for entry in history
         ),
     )
+
+
+class Recording:
+    """Readings arriving one by one, written to CSV as they come, with the time counted from the first.
+
+    Create one with `Recording.start(path)` for a file, or `Recording(CsvWriter(stream))` for a stream you keep; call `add` for
+    each Reading and `stop` when done. `add` raises `OSError` if the file cannot be written (a full disk, say), which
+    the caller should treat as the end of the Recording.
+    """
+
+    def __init__(self, writer: CsvWriter) -> None:
+        self._writer = writer
+        self._first_timestamp: float | None = None
+
+    @classmethod
+    def start(cls, path: Path) -> "Recording":
+        """Begin a Recording to a new file at `path`, replacing any file there. Raises `OSError` if it cannot."""
+        return cls(CsvWriter.open(path))
+
+    @property
+    def path(self) -> Path | None:
+        return self._writer.path
+
+    @property
+    def rows_written(self) -> int:
+        return self._writer.rows_written
+
+    @property
+    def active(self) -> bool:
+        return not self._writer.closed
+
+    def add(
+        self, reading: Reading, timestamp: float, *, setup: Setup | None = None, taken_at: datetime | None = None
+    ) -> None:
+        """Write one Reading. `timestamp` is its `time.monotonic()` seconds, of which only differences matter."""
+        if self._first_timestamp is None:
+            self._first_timestamp = timestamp
+        self._writer.write(LoggedReading(reading, timestamp - self._first_timestamp, taken_at, setup))
+
+    def stop(self) -> None:
+        """End the Recording and close its file. Safe to call more than once."""
+        self._writer.close()

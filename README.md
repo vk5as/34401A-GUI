@@ -1,0 +1,32 @@
+# Agilent 34401A Remote Control
+
+A Tk desktop application and command-line tool for remotely operating an Agilent/HP 34401A
+digital multimeter over GPIB or RS-232, with a built-in simulator for development and testing.
+
+> This project is under active development and is not yet usable. See the
+> [spec](https://github.com/vk5as/34401A-GUI/issues/1) for the plan.
+
+## Development
+
+`tkinter` is a system package, not a PyPI one. On Debian/Ubuntu: `sudo apt install python3-tk xvfb`.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/pre-commit install --install-hooks
+```
+
+### Code quality
+
+```bash
+.venv/bin/black --check src tests            # formatting
+.venv/bin/ruff check src tests               # linting (all rules enabled)
+.venv/bin/mypy                               # strict type checking
+.venv/bin/bandit -c pyproject.toml -r src    # security scan
+.venv/bin/pip-audit .                        # runtime dependency vulnerabilities
+.venv/bin/pytest                             # tests (use xvfb-run -a on a headless box)
+.venv/bin/coverage report --omit="*/agilent34401a/gui/*" --fail-under=85   # coverage gate (GUI excluded)
+```
+
+The coverage gate covers everything except the `gui` package; GUI coverage is still shown in the
+`pytest` report but isn't gated.

@@ -75,6 +75,10 @@ _Avoid_: Buffer, log
 **Break Marker**:
 A point in the History where the Function or unit changed, so Readings on either side are not comparable.
 
+**Recording**:
+Writing each Reading to a CSV file as it arrives, until stopped. It keeps going across Function changes, unlike the History, which is a bounded window of recent Readings.
+_Avoid_: Logging (except for the CLI's `log` subcommand), capture
+
 ### Taking readings
 
 **Continuous**:

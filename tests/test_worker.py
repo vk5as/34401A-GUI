@@ -15,6 +15,9 @@ from agilent34401a.worker import (
     Disconnected,
     ErrorsReported,
     Event,
+    RawFailed,
+    RawRefused,
+    RawReplied,
     ReadingFailed,
     ReadingTaken,
     SetupChanged,
@@ -483,3 +486,126 @@ def test_selecting_a_function_keeps_its_own_settings_and_reports_the_setup(start
     assert reading.reading.function is Function.RESISTANCE_2W
     assert reading.setup == expected
     assert [command for command in simulator.writes if not command.endswith("?")] == ['FUNC "RES"']
+
+
+def test_a_raw_query_is_answered_with_the_reply_and_changes_no_setup(started):
+    worker, events = started(HookedSimulator(identity=AGILENT_IDENTITY))
+    next_event(events)
+
+    worker.send_raw("*IDN?")
+
+    assert next_event(events) == RawReplied("*IDN?", AGILENT_IDENTITY, ())
+    time.sleep(0.05)
+    assert events.empty()
+
+
+def test_a_raw_write_is_followed_by_the_setup_the_meter_is_now_in(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw('FUNC "RES"')
+
+    assert next_event(events) == RawReplied('FUNC "RES"', None, ())
+    changed = next_event(events)
+    assert changed == SetupChanged(Setup.default(Function.RESISTANCE_2W))
+    worker.start_continuous()
+    assert next_reading(events).reading.function is Function.RESISTANCE_2W
+
+
+def test_a_raw_write_the_meter_complains_about_reports_its_errors(started):
+    worker, events = started(HookedSimulator())
+    next_event(events)
+
+    worker.send_raw("NOTACOMMAND")
+
+    replied = next_event(events)
+    assert isinstance(replied, RawReplied)
+    assert [queued.code for queued in replied.errors] == [-113]
+
+
+def test_raw_commands_are_served_between_readings_while_continuous_runs(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    worker.start_continuous()
+    next_reading(events)
+
+    worker.send_raw("VOLT:DC:NPLC 10")
+
+    after = collect_until(events, lambda event: isinstance(event, SetupChanged))
+    assert any(isinstance(event, RawReplied) for event in after)
+    assert next_reading(events).setup.nplc == 10
+    # The Transport was only ever used by the worker: the Reading in progress was never cut in two.
+    assert "VOLT:DC:NPLC 10" in simulator.writes
+
+
+def test_a_raw_query_that_times_out_is_reported_and_the_worker_carries_on(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("NOTAQUERY?")
+
+    failed = next_event(events)
+    assert isinstance(failed, RawFailed)
+    assert failed.command == "NOTAQUERY?"
+    assert [queued.code for queued in failed.errors] == [-113]
+    assert simulator.clears == 1
+    worker.send_raw("*IDN?")
+    assert isinstance(next_event(events), RawReplied)
+    assert worker.is_alive()
+
+
+def test_a_raw_calibration_write_is_refused_and_never_reaches_the_meter(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("CAL:SEC:STAT OFF,HP034401")
+
+    refused = next_event(events)
+    assert isinstance(refused, RawRefused)
+    assert refused.command == "CAL:SEC:STAT OFF,HP034401"
+    assert "calibration" in refused.message
+    worker.send_raw("*IDN?")
+    next_event(events)
+    assert not any(command.upper().startswith("CAL") for command in simulator.writes)
+
+
+def test_a_raw_calibration_write_goes_through_when_it_is_explicitly_allowed(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("CAL:STR 'x'", allow_calibration=True)
+
+    assert isinstance(next_event(events), RawReplied)
+    assert "CAL:STR 'x'" in simulator.writes
+
+
+def test_a_read_only_calibration_query_needs_no_override(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("CAL:COUN?")
+
+    replied = next_event(events)
+    assert isinstance(replied, RawReplied)
+    assert replied.reply == "+1"
+    assert "CAL:COUN?" in simulator.writes
+
+
+def test_an_empty_raw_command_is_reported_not_sent(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    written = len(simulator.writes)
+
+    worker.send_raw("   ")
+
+    failed = next_event(events)
+    assert isinstance(failed, RawFailed)
+    assert "Nothing to send" in failed.message
+    assert len(simulator.writes) == written

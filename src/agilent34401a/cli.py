@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable, Sequence
 from functools import partial
 
-from agilent34401a import __version__, cli_admin
+from agilent34401a import __version__, cli_admin, cli_raw
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings, open_transport
 from agilent34401a.driver import Driver, QueuedError
@@ -43,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(title="commands", dest="command")
     # Each subcommand lives in its own _add_<name>_command and registers here with one line.
     _add_read_command(subparsers)
+    _add_raw_command(subparsers)
     _add_admin_commands(subparsers)
 
     args = parser.parse_args(argv)
@@ -166,6 +167,36 @@ def _run_read(args: argparse.Namespace) -> int:
     range_ = _parse_range(args.range_, args.parser)
     return run_on_meter(
         args, lambda driver, transport: _read(driver, transport, args.function, range_, args.resolution)
+    )
+
+
+def _add_raw_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "raw",
+        _run_raw,
+        summary="send a raw SCPI command or query and print the reply",
+        description=(
+            "Send one raw SCPI command or query (several may be joined with ';') and print the Meter's reply. "
+            "Commands that would change the Meter's calibration are refused unless --allow-calibration is given."
+        ),
+    )
+    add_connection_options(parser)
+    parser.add_argument("command", help="the SCPI command or query, quoted so the shell passes it as one argument")
+    parser.add_argument(
+        "--allow-calibration",
+        action="store_true",
+        help="send calibration commands (CAL:SEC, CAL:VAL, CAL, CAL:STR) instead of refusing them; this can "
+        "invalidate the Meter's calibration",
+    )
+
+
+def _run_raw(args: argparse.Namespace) -> int:
+    return run_on_meter(
+        args,
+        lambda driver, transport: cli_raw.send_raw(
+            driver, transport, args.command, allow_calibration=args.allow_calibration, prog=_PROG
+        ),
     )
 
 

@@ -13,6 +13,8 @@ from typing import Any, Literal
 from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
 from agilent34401a.gui.chart_tab import install_chart
+from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
+from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
 from agilent34401a.gui.system_tab import SystemTab
@@ -106,6 +108,7 @@ class MainWindow:
         self._setup: Setup | None = None  # what the Meter last reported it is doing
         self._last: ReadingTaken | None = None  # the Reading on the readout
         self._reading_listeners: list[Callable[[ReadingTaken], None]] = []
+        self._tabs: dict[str, tuple[tk.Widget, tk.Widget | None]] = {}  # title -> (tab, widget to focus on show)
 
         root.title(f"Agilent 34401A {__version__}")
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -202,6 +205,14 @@ class MainWindow:
         self.sense_tab = SenseTab(self.notebook, self._request)
         self.add_tab("Sense", self.sense_tab.frame)
         self._add_system_tab()
+        # The console holds the Worker, not the window: a reference cycle through the window would leave Tk variables
+        # to be freed by whichever thread the garbage collector happens to run on.
+        worker = self._worker
+        self.console = ConsoleTab(
+            self.notebook, lambda command, allow: worker.send_raw(command, allow_calibration=allow)
+        )
+        self.add_tab(CONSOLE_TITLE, self.console.frame, focus=self.console.entry)
+        self.add_event_handler(self.console.handle_event)
 
     def add_reading_listener(self, listener: Callable[[ReadingTaken], None]) -> None:
         """Call `listener` with every Reading as it is taken, on the GUI thread. Keep it cheap."""
@@ -312,6 +323,7 @@ class MainWindow:
         self.register_shortcut("R", "Run or pause Continuous Readings", self._shortcut_run)
         for sequence, description in _PLANNED_SHORTCUTS:
             self.shortcuts.plan(sequence, description)
+        self.register_shortcut("Ctrl+K", "Open the SCPI console", partial(self.show_tab, CONSOLE_TITLE))
         self.add_menu_command("Help", "Shortcuts", self.show_shortcuts)
         self.shortcuts_dialog: tk.Toplevel | None = None
 
@@ -347,11 +359,25 @@ class MainWindow:
         if str(self.run_button.cget("state")) != "disabled":
             self._toggle_run()
 
-    def add_tab(self, title: str, tab: tk.Widget) -> None:
-        """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`."""
+    def add_tab(self, title: str, tab: tk.Widget, *, focus: tk.Widget | None = None) -> None:
+        """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`.
+
+        `focus` is the widget that takes the keyboard focus when `show_tab` brings the tab forward.
+        """
         self._has_tabs = True
         self.notebook.add(tab, text=title)
+        self._tabs[title] = (tab, focus)
         self._layout()
+
+    def show_tab(self, title: str) -> None:
+        """Bring the tab called `title` to the front and give its main widget the keyboard focus.
+
+        Raises `KeyError` if there is no such tab. A keyboard shortcut or menu entry calls this, e.g.
+        `window.show_tab("SCPI console")`.
+        """
+        tab, focus = self._tabs[title]
+        self.notebook.select(tab)  # type: ignore[no-untyped-call]  # ttk.Notebook.select is untyped in typeshed
+        (focus or tab).focus_set()
 
     def _build_status_bar(self) -> None:
         status = ttk.Frame(self.root, relief="sunken", padding=(6, 2))

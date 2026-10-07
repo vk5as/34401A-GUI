@@ -936,13 +936,13 @@ def test_keys_still_work_while_a_read_only_combobox_has_focus(make_window):
 def test_ctrl_shortcuts_work_even_in_a_text_field(make_window):
     window = make_window()
     calls = []
-    window.register_shortcut("Ctrl+K", "Test", lambda: calls.append("k"))
+    window.register_shortcut("Ctrl+L", "Test", lambda: calls.append("l"))
     field = tk.Text(window.root)
     field.pack()
 
-    press(field, "Control-Key-k")
+    press(field, "Control-Key-l")
 
-    assert calls == ["k"]
+    assert calls == ["l"]
 
 
 def test_space_does_not_fire_a_shortcut_on_top_of_a_focused_button_pressing_itself(make_window):
@@ -989,18 +989,18 @@ def test_help_shortcuts_lists_every_shortcut_marking_the_planned_ones(make_windo
     assert [f"F{number}" for number in range(1, 12)] == [key for key in listed if key.startswith("F")]
     assert listed["F2"][0] == "Select AC V"
     assert listed["R"][1] == ""
-    for planned in ("Space", "Ctrl+L", "Ctrl+K", "Ctrl+,"):
+    for planned in ("Space", "Ctrl+L", "Ctrl+,"):
         assert "planned" in listed[planned][1]
 
 
 def test_a_planned_shortcut_is_listed_as_available_once_a_feature_registers_it(make_window):
     window = make_window()
-    window.register_shortcut("Ctrl+K", "Open the SCPI console", lambda: None)
+    window.register_shortcut("Ctrl+L", "Start or stop recording", lambda: None)
 
     window.show_shortcuts()
 
-    assert _listed(window)["Ctrl+K"] == ("Open the SCPI console", "")
-    assert "planned" in _listed(window)["Ctrl+L"][1]
+    assert _listed(window)["Ctrl+L"] == ("Start or stop recording", "")
+    assert "planned" in _listed(window)["Ctrl+,"][1]
 
 
 def test_asking_for_the_shortcuts_twice_shows_one_window(make_window):

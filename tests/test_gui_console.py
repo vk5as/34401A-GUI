@@ -8,7 +8,7 @@ from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.meter import Function
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.worker import Disconnected
-from tests.test_gui_app import connected, make_window, press, pump, tk_root  # noqa: F401 - the fixtures come with them
+from tests.test_gui_app import connected, press, pump
 
 
 class RecordingSimulator(Simulator):
@@ -36,7 +36,7 @@ def send(window: MainWindow, command: str) -> None:
     window.console.submit()
 
 
-def test_the_window_has_a_scpi_console_tab_that_waits_for_the_connection(make_window):  # noqa: F811
+def test_the_window_has_a_scpi_console_tab_that_waits_for_the_connection(make_window):
     window = make_window()
     titles = [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()]
 
@@ -50,7 +50,7 @@ def test_the_window_has_a_scpi_console_tab_that_waits_for_the_connection(make_wi
     assert str(window.console.send_button.cget("state")) == "normal"
 
 
-def test_a_query_typed_into_the_console_shows_the_command_and_the_meters_reply(make_window):  # noqa: F811
+def test_a_query_typed_into_the_console_shows_the_command_and_the_meters_reply(make_window):
     window = make_window(Simulator(identity=AGILENT_IDENTITY))
     pump(window, lambda: connected(window))
 
@@ -61,7 +61,7 @@ def test_a_query_typed_into_the_console_shows_the_command_and_the_meters_reply(m
     assert window.console.entry.get() == ""
 
 
-def test_the_return_key_sends_the_command(make_window):  # noqa: F811
+def test_the_return_key_sends_the_command(make_window):
     window = make_window(Simulator(identity=AGILENT_IDENTITY))
     pump(window, lambda: connected(window))
     window.show_tab("SCPI console")
@@ -73,7 +73,7 @@ def test_the_return_key_sends_the_command(make_window):  # noqa: F811
     pump(window, shows(window.console, AGILENT_IDENTITY))
 
 
-def test_a_command_that_changes_the_setup_updates_the_main_window(make_window):  # noqa: F811
+def test_a_command_that_changes_the_setup_updates_the_main_window(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
@@ -83,7 +83,7 @@ def test_a_command_that_changes_the_setup_updates_the_main_window(make_window): 
     assert "(sent)" in window.console.text
 
 
-def test_the_meters_complaint_about_a_command_is_shown(make_window):  # noqa: F811
+def test_the_meters_complaint_about_a_command_is_shown(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
@@ -92,7 +92,7 @@ def test_the_meters_complaint_about_a_command_is_shown(make_window):  # noqa: F8
     pump(window, shows(window.console, "Meter error -113: Undefined header"))
 
 
-def test_a_query_the_meter_never_answers_is_reported_and_the_console_keeps_working(make_window):  # noqa: F811
+def test_a_query_the_meter_never_answers_is_reported_and_the_console_keeps_working(make_window):
     window = make_window(Simulator(identity=AGILENT_IDENTITY))
     pump(window, lambda: connected(window))
 
@@ -103,7 +103,7 @@ def test_a_query_the_meter_never_answers_is_reported_and_the_console_keeps_worki
     pump(window, shows(window.console, AGILENT_IDENTITY))
 
 
-def test_raw_commands_are_served_while_continuous_runs_and_readings_carry_on(make_window):  # noqa: F811
+def test_raw_commands_are_served_while_continuous_runs_and_readings_carry_on(make_window):
     simulator = RecordingSimulator(identity=AGILENT_IDENTITY)
     window = make_window(simulator)
     pump(window, lambda: connected(window))
@@ -117,7 +117,7 @@ def test_raw_commands_are_served_while_continuous_runs_and_readings_carry_on(mak
     assert window.run_button.cget("text") == "Pause"
 
 
-def test_a_calibration_write_is_refused_and_never_sent_unless_the_override_is_ticked(make_window):  # noqa: F811
+def test_a_calibration_write_is_refused_and_never_sent_unless_the_override_is_ticked(make_window):
     simulator = RecordingSimulator()
     window = make_window(simulator)
     pump(window, lambda: connected(window))
@@ -132,7 +132,7 @@ def test_a_calibration_write_is_refused_and_never_sent_unless_the_override_is_ti
     pump(window, lambda: "CAL:STR 'x'" in simulator.commands)
 
 
-def test_a_read_only_calibration_query_needs_no_override(make_window):  # noqa: F811
+def test_a_read_only_calibration_query_needs_no_override(make_window):
     simulator = RecordingSimulator()
     window = make_window(simulator)
     pump(window, lambda: connected(window))
@@ -144,7 +144,7 @@ def test_a_read_only_calibration_query_needs_no_override(make_window):  # noqa: 
     assert "CAL:STR?" in simulator.commands
 
 
-def test_a_blank_command_is_not_sent(make_window):  # noqa: F811
+def test_a_blank_command_is_not_sent(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
@@ -154,7 +154,7 @@ def test_a_blank_command_is_not_sent(make_window):  # noqa: F811
     assert window.console.text == ""
 
 
-def test_up_and_down_walk_through_the_history_and_back_to_what_was_being_typed(make_window):  # noqa: F811
+def test_up_and_down_walk_through_the_history_and_back_to_what_was_being_typed(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
     for command in ("*IDN?", "FUNC?", "SYST:ERR?"):
@@ -178,7 +178,7 @@ def test_up_and_down_walk_through_the_history_and_back_to_what_was_being_typed(m
     assert console.entry.get() == "half-typed"
 
 
-def test_the_up_and_down_keys_recall_commands(make_window):  # noqa: F811
+def test_the_up_and_down_keys_recall_commands(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
     send(window, "*IDN?")
@@ -195,7 +195,7 @@ def test_the_up_and_down_keys_recall_commands(make_window):  # noqa: F811
     assert window.console.entry.get() == "FUNC?"
 
 
-def test_sending_the_same_command_twice_in_a_row_keeps_one_history_entry(make_window):  # noqa: F811
+def test_sending_the_same_command_twice_in_a_row_keeps_one_history_entry(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
@@ -207,7 +207,7 @@ def test_sending_the_same_command_twice_in_a_row_keeps_one_history_entry(make_wi
     assert window.console.history == ("*IDN?", "FUNC?", "*IDN?")
 
 
-def test_a_refused_command_stays_in_the_history_so_it_can_be_recalled_and_edited(make_window):  # noqa: F811
+def test_a_refused_command_stays_in_the_history_so_it_can_be_recalled_and_edited(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
@@ -217,7 +217,7 @@ def test_a_refused_command_stays_in_the_history_so_it_can_be_recalled_and_edited
     assert window.console.entry.get() == "CAL:VAL 1"
 
 
-def test_clear_empties_the_output_but_not_the_history(make_window):  # noqa: F811
+def test_clear_empties_the_output_but_not_the_history(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
     send(window, "*IDN?")
@@ -229,7 +229,7 @@ def test_clear_empties_the_output_but_not_the_history(make_window):  # noqa: F81
     assert window.console.history == ("*IDN?",)
 
 
-def test_show_tab_brings_the_console_forward_and_focuses_its_entry(make_window):  # noqa: F811
+def test_show_tab_brings_the_console_forward_and_focuses_its_entry(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
     other = ttk.Frame(window.notebook)
@@ -244,14 +244,14 @@ def test_show_tab_brings_the_console_forward_and_focuses_its_entry(make_window):
     assert window.root.focus_get() is window.console.entry
 
 
-def test_show_tab_rejects_a_tab_that_does_not_exist(make_window):  # noqa: F811
+def test_show_tab_rejects_a_tab_that_does_not_exist(make_window):
     window = make_window()
 
     with pytest.raises(KeyError):
         window.show_tab("No such tab")
 
 
-def test_the_console_is_disabled_again_when_the_connection_ends(make_window):  # noqa: F811
+def test_the_console_is_disabled_again_when_the_connection_ends(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
@@ -260,7 +260,7 @@ def test_the_console_is_disabled_again_when_the_connection_ends(make_window):  #
     assert str(window.console.entry.cget("state")) == "disabled"
 
 
-def test_ctrl_k_brings_up_the_console_from_anywhere_and_lists_as_available(make_window):  # noqa: F811
+def test_ctrl_k_brings_up_the_console_from_anywhere_and_lists_as_available(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
     other = ttk.Frame(window.notebook)
@@ -277,7 +277,7 @@ def test_ctrl_k_brings_up_the_console_from_anywhere_and_lists_as_available(make_
     assert listed["Ctrl+K"] == ("Open the SCPI console", "")
 
 
-def test_ctrl_k_in_the_console_entry_does_not_eat_the_command_being_typed(make_window):  # noqa: F811
+def test_ctrl_k_in_the_console_entry_does_not_eat_the_command_being_typed(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
     window.console.entry.insert(0, "*IDN?")

@@ -27,3 +27,7 @@ class UnrecognisedIdentityError(MeterError):
 
 class InvalidSetupError(ValueError):
     """A Setup the Meter could never hold, such as a Range the Function does not have."""
+
+
+class CalibrationBlockedError(ValueError):
+    """A raw command would change the Meter's calibration, which is refused unless explicitly allowed (ADR-0006)."""

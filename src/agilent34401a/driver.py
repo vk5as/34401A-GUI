@@ -4,8 +4,9 @@ import math
 import re
 from dataclasses import dataclass
 
-from agilent34401a.errors import MalformedReplyError, UnrecognisedIdentityError
+from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, UnrecognisedIdentityError
 from agilent34401a.meter import NPLC_VALUES, Function, Reading, Setup, format_range, parse_reading
+from agilent34401a.raw_scpi import analyse
 from agilent34401a.transport import Transport
 
 # Early firmware reports HEWLETT-PACKARD, later firmware Agilent Technologies; both are the same Meter.
@@ -15,6 +16,7 @@ _IDENTITY_FIELDS = 4
 
 # The Meter's error queue holds at most 20 entries, so draining never needs more reads than that.
 _ERROR_QUEUE_SIZE = 20
+_LINE_BREAK = re.compile(r"[\r\n]")
 _ERROR_ENTRY = re.compile(r'\s*([+-]?\d+)\s*,\s*"(.*)"\s*')
 
 # The SCPI header each Function's Range and Integration Time commands start with. DC voltage ratio shares DC
@@ -66,6 +68,16 @@ class QueuedError:
 
     code: int
     message: str
+
+
+@dataclass(frozen=True)
+class RawResult:
+    """What came of a raw command: the Meter's reply to it (None if it was not a query) and what its error queue held."""
+
+    reply: str | None
+    errors: tuple[QueuedError, ...]
+    changes_meter: bool
+    """The command was not a pure query, so the Meter's Setup may no longer be the one the driver remembers."""
 
 
 class Driver:
@@ -142,6 +154,32 @@ class Driver:
             setup = setup.with_nplc(self._read_nplc(function))
         self._setup = setup
         return setup
+
+    def send_raw(self, command: str, *, allow_calibration: bool = False) -> RawResult:
+        """Send `command` as typed, which may be several commands joined with `;`, and return the Meter's reply.
+
+        Calibration writes are refused with `CalibrationBlockedError`, before anything is sent, unless
+        `allow_calibration` (ADR-0006). A command that is not a pure query is followed by a check of the error
+        queue (ADR-0005). The driver does not re-read the Setup; the caller does that when `changes_meter` is set.
+        """
+        if _LINE_BREAK.search(command):
+            message = "A raw command must be one line"
+            raise ValueError(message)
+        analysis = analyse(command)
+        if analysis.is_empty:
+            message = "Nothing to send"
+            raise ValueError(message)
+        if analysis.writes_calibration and not allow_calibration:
+            message = "This would change the Meter's calibration, so it was not sent"
+            raise CalibrationBlockedError(message)
+        command = command.strip()
+        reply: str | None = None
+        if analysis.has_reply:
+            reply = self._transport.query(command)
+        else:
+            self._transport.write(command)
+        errors = tuple(self.drain_errors()) if analysis.changes_meter else ()
+        return RawResult(reply, errors, analysis.changes_meter)
 
     def drain_errors(self) -> list[QueuedError]:
         """Read the Meter's error queue until it is empty."""

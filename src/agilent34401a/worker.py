@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from functools import partial
 
 from agilent34401a.driver import Driver, Identity, QueuedError
-from agilent34401a.errors import MalformedReplyError, MeterError, TransportTimeoutError
+from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, MeterError, TransportTimeoutError
 from agilent34401a.meter import Function, Reading, Setup, reading_timeout
 from agilent34401a.transport import Transport
 
@@ -81,6 +81,35 @@ class ReadingFailed:
 
 
 @dataclass(frozen=True)
+class RawReplied:
+    """A raw command went to the Meter. `reply` is its answer, or None if it was not a query."""
+
+    command: str
+    reply: str | None
+    errors: tuple[QueuedError, ...]
+
+
+@dataclass(frozen=True)
+class RawRefused:
+    """A raw command was not sent because it would change the Meter's calibration (ADR-0006)."""
+
+    command: str
+    message: str
+
+
+@dataclass(frozen=True)
+class RawFailed:
+    """A raw command could not be completed (no answer, a malformed one, or nothing to send).
+
+    The Connection was resynchronised, and `errors` is what the Meter's error queue held afterwards.
+    """
+
+    command: str
+    message: str
+    errors: tuple[QueuedError, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorkerFailed:
     """Something unexpected ended the Worker. It is always followed by `Disconnected`."""
 
@@ -98,6 +127,9 @@ Event = (
     | ReadingTaken
     | SetupChanged
     | ErrorsReported
+    | RawReplied
+    | RawRefused
+    | RawFailed
     | SetupFailed
     | ReadingFailed
     | WorkerFailed
@@ -130,7 +162,13 @@ class _Select:
     function: Function
 
 
-_Request = _Run | _Pause | _Shutdown | _Apply | _Select
+@dataclass(frozen=True)
+class _Raw:
+    command: str
+    allow_calibration: bool
+
+
+_Request = _Run | _Pause | _Shutdown | _Apply | _Select | _Raw
 
 
 class Worker:
@@ -161,6 +199,14 @@ class Worker:
     def select_function(self, function: Function) -> None:
         """Switch the Meter to `function`, keeping that Function's own Range and Integration Time."""
         self._requests.put(_Select(function))
+
+    def send_raw(self, command: str, *, allow_calibration: bool = False) -> None:
+        """Send a raw SCPI command or query between Readings, then report what the Meter answered.
+
+        A calibration write is refused unless `allow_calibration` (ADR-0006). A command that is not a pure query
+        may have changed the Meter's Setup, so it is followed by the Setup the Meter is now in.
+        """
+        self._requests.put(_Raw(command, allow_calibration))
 
     def is_alive(self) -> bool:
         """Whether the Worker's thread is still running."""
@@ -213,6 +259,8 @@ class Worker:
                     self._change_setup(driver, transport, partial(driver.apply, setup))
                 case _Select(function):
                     self._change_setup(driver, transport, partial(driver.select_function, function))
+                case _Raw(command, allow_calibration):
+                    self._send_raw(driver, transport, command, allow_calibration=allow_calibration)
             if not running or (congested and request is None):
                 continue  # paused, or waiting for the consumer to catch up
             self._take_reading(driver, transport)
@@ -234,6 +282,34 @@ class Worker:
             transport.clear()
             return
         self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup))
+
+    def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:
+        try:
+            result = driver.send_raw(command, allow_calibration=allow_calibration)
+        except CalibrationBlockedError as error:
+            _LOG.warning("Refused a raw calibration command: %r", command)
+            self._events.put(RawRefused(command, str(error)))
+            return
+        except ValueError as error:
+            self._events.put(RawFailed(command, str(error)))
+            return
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            _LOG.warning("A raw command failed, resynchronising the Connection: %s", error)
+            transport.clear()
+            self._events.put(RawFailed(command, str(error), self._drain_after_failure(driver, transport)))
+            return
+        self._events.put(RawReplied(command, result.reply, result.errors))
+        if result.changes_meter:  # it may have changed the Setup behind the application's back
+            self._change_setup(driver, transport, list)
+
+    @staticmethod
+    def _drain_after_failure(driver: Driver, transport: Transport) -> tuple[QueuedError, ...]:
+        """Empty the error queue of a Meter that did not answer, so its complaint is not blamed on a later command."""
+        try:
+            return tuple(driver.drain_errors())
+        except (MalformedReplyError, TransportTimeoutError):
+            transport.clear()
+            return ()
 
     def _change_setup(self, driver: Driver, transport: Transport, change: Callable[[], list[QueuedError]]) -> None:
         """Make a change to the Meter's Setup, then report the Setup it ended up in and any errors it queued."""

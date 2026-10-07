@@ -11,6 +11,8 @@ from typing import Literal
 
 from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
+from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
+from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.meter import NPLC_VALUES, Function, Resolution, Setup, describe_setup, format_range, format_reading
 from agilent34401a.rate import ReadingRate
 from agilent34401a.settings import Settings
@@ -78,6 +80,8 @@ class MainWindow:
         self._poll_id: str | None = None
         self._setup: Setup | None = None  # what the Meter last reported it is doing
         self._last: ReadingTaken | None = None  # the Reading on the readout
+        self._event_listeners: list[Callable[[Event], None]] = []
+        self._tabs: dict[str, tuple[tk.Widget, tk.Widget | None]] = {}  # title -> (tab, widget to focus on show)
 
         root.title(f"Agilent 34401A {__version__}")
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -156,6 +160,18 @@ class MainWindow:
 
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
+        # The console holds the Worker, not the window: a reference cycle through the window would leave Tk variables
+        # to be freed by whichever thread the garbage collector happens to run on.
+        worker = self._worker
+        self.console = ConsoleTab(
+            self.notebook, lambda command, allow: worker.send_raw(command, allow_calibration=allow)
+        )
+        self.add_tab(CONSOLE_TITLE, self.console.frame, focus=self.console.entry)
+        self.add_event_listener(self.console.handle_event)
+
+    def add_event_listener(self, listener: Callable[[Event], None]) -> None:
+        """Call `listener` with every event the Worker reports, on the Tk thread, for a tab that shows its own."""
+        self._event_listeners.append(listener)
 
     def menu(self, name: str) -> tk.Menu:
         """Return the menu called `name`, creating it in its usual place (File, View, Help, then any others)."""
@@ -178,12 +194,26 @@ class MainWindow:
         """Add an entry to the menubar, creating the menu if needed. Entries keep the order they are added in."""
         self.menu(menu).add_command(label=label, command=command)
 
-    def add_tab(self, title: str, tab: tk.Widget) -> None:
-        """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`."""
+    def add_tab(self, title: str, tab: tk.Widget, *, focus: tk.Widget | None = None) -> None:
+        """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`.
+
+        `focus` is the widget that takes the keyboard focus when `show_tab` brings the tab forward.
+        """
         if not self._has_tabs:
             self.notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
             self._has_tabs = True
         self.notebook.add(tab, text=title)
+        self._tabs[title] = (tab, focus)
+
+    def show_tab(self, title: str) -> None:
+        """Bring the tab called `title` to the front and give its main widget the keyboard focus.
+
+        Raises `KeyError` if there is no such tab. A keyboard shortcut or menu entry calls this, e.g.
+        `window.show_tab("SCPI console")`.
+        """
+        tab, focus = self._tabs[title]
+        self.notebook.select(tab)  # type: ignore[no-untyped-call]  # ttk.Notebook.select is untyped in typeshed
+        (focus or tab).focus_set()
 
     def _build_status_bar(self) -> None:
         status = ttk.Frame(self.root, relief="sunken", padding=(6, 2))
@@ -280,6 +310,8 @@ class MainWindow:
         self._poll_id = self.root.after(_POLL_MS, self._drain)
 
     def _handle(self, event: Event) -> None:
+        for listener in self._event_listeners:
+            listener(event)
         match event:
             case ReadingTaken(timestamp=timestamp):
                 self._last = event

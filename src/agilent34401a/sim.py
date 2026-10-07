@@ -4,10 +4,21 @@ import math
 import os
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 
 from agilent34401a.errors import TransportError, TransportTimeoutError
-from agilent34401a.meter import NPLC_VALUES, Function, Setup, measurement_time
+from agilent34401a.meter import (
+    NPLC_VALUES,
+    AcFilter,
+    Autozero,
+    Function,
+    GateTime,
+    InputImpedance,
+    Setup,
+    Terminals,
+    measurement_time,
+)
 
 HEWLETT_PACKARD_IDENTITY = "HEWLETT-PACKARD,34401A,0,10-5-2"
 AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
@@ -64,6 +75,13 @@ _LONG_FORMS = {
     "RANGE": "RANG",
     "NPLCYCLES": "NPLC",
     "RATIO": "RAT",
+    "DETECTOR": "DET",
+    "BANDWIDTH": "BAND",
+    "APERTURE": "APER",
+    "INPUT": "INP",
+    "IMPEDANCE": "IMP",
+    "ROUTE": "ROUT",
+    "TERMINALS": "TERM",
 }
 
 # What `FUNC?` answers for each Function.
@@ -125,7 +143,8 @@ class Simulator:
 
     `signals` sets the Applied Signal per Function (`dc_voltage` is a shortcut for DC voltage). `time_scale`
     stretches (or, at 0, removes) the time a Reading takes; it defaults to the `AGILENT34401A_SIM_TIME_SCALE`
-    environment variable, or real time when that is unset.
+    environment variable, or real time when that is unset. `terminals` is the position of the Meter's front/rear
+    switch: only a person can move it, so a test sets it here, and a reset leaves it alone.
     """
 
     def __init__(
@@ -149,6 +168,7 @@ class Simulator:
         if dc_voltage is not None:
             self._signals[Function.DC_VOLTAGE] = dc_voltage
         self._sleep = sleep
+        self.terminals = Terminals.FRONT
         self._closed = False
         self._errors: deque[str] = deque()
         # Each pending reply carries the real-time seconds the Meter needs before it can send it.
@@ -160,6 +180,14 @@ class Simulator:
         self._ranges: dict[Function, float | None] = dict.fromkeys(_SETTING_GROUPS.values())
         self._nplc: dict[Function, float] = {
             group: Setup.default(group).nplc or 0 for group in _SETTING_GROUPS.values() if group.has_integration_time
+        }
+        # The AC Filter, Autozero and Input Impedance are each one setting for all the Functions that have them.
+        self._ac_filter = Setup.default(Function.AC_VOLTAGE).ac_filter or AcFilter.MEDIUM
+        self._autozero = Autozero.ON
+        self._input_impedance = InputImpedance.TEN_MEGOHM
+        self._gate_times = {
+            function: Setup.default(function).gate_time or GateTime.HUNDRED_MILLISECONDS
+            for function in (Function.FREQUENCY, Function.PERIOD)
         }
 
     def write(self, command: str) -> None:
@@ -180,7 +208,10 @@ class Simulator:
             self._reply(self._measure(setup), measurement_time(setup))
         elif key == "FUNC":
             self._function_command(query=query, argument=argument)
-        elif not self._setting_command(path, query=query, argument=argument):
+        elif not (
+            self._setting_command(path, query=query, argument=argument)
+            or self._option_command(key, query=query, argument=argument)
+        ):
             self._errors.append(_UNDEFINED_HEADER)
 
     def _common_command(self, header: str) -> None:
@@ -228,6 +259,83 @@ class Simulator:
         else:
             setter(function, argument.upper())
         return True
+
+    def _option_command(self, key: str, *, query: bool, argument: str) -> bool:
+        """Handle the sense options (`DET:BAND`, `FREQ:APER`, `PER:APER`, `ZERO:AUTO`, `INP:IMP:AUTO`, `ROUT:TERM?`)."""
+        match key:
+            case "DET:BAND":
+                setter, getter = self._set_ac_filter, self._get_ac_filter
+            case "FREQ:APER" | "PER:APER":
+                function = Function.FREQUENCY if key.startswith("FREQ") else Function.PERIOD
+                setter, getter = partial(self._set_gate_time, function), partial(self._get_gate_time, function)
+            case "ZERO:AUTO":
+                setter, getter = self._set_autozero, self._get_autozero
+            case "INP:IMP:AUTO":
+                setter, getter = self._set_input_impedance, self._get_input_impedance
+            case "ROUT:TERM" if query:  # the switch is physical, so it cannot be set remotely
+                self._reply(self.terminals.value)
+                return True
+            case _:
+                return False
+        if query:
+            self._reply(getter())
+        elif not argument:
+            self._errors.append(_MISSING_PARAMETER)
+        else:
+            setter(argument.upper())
+        return True
+
+    def _choose(self, word: str, choices: Sequence[float]) -> float | None:
+        """Pick from `choices`, which are in ascending order: a value between two selects the next one up."""
+        shortcuts = {"MIN": choices[0], "MAX": choices[-1], "DEF": choices[1]}
+        value = shortcuts.get(word, _number(word))
+        if value is None:
+            self._errors.append(_ILLEGAL_PARAMETER)
+            return None
+        fitting = [choice for choice in choices if choice >= value]
+        if not fitting:
+            self._errors.append(_DATA_OUT_OF_RANGE)
+            return None
+        return fitting[0]
+
+    def _set_ac_filter(self, word: str) -> None:
+        chosen = self._choose(word, [ac_filter.value for ac_filter in AcFilter])
+        if chosen is not None:
+            self._ac_filter = AcFilter(chosen)
+
+    def _get_ac_filter(self) -> str:
+        return _number_reply(self._ac_filter.hertz)
+
+    def _set_gate_time(self, function: Function, word: str) -> None:
+        chosen = self._choose(word, [gate_time.value for gate_time in GateTime])
+        if chosen is not None:
+            self._gate_times[function] = GateTime(chosen)
+
+    def _get_gate_time(self, function: Function) -> str:
+        return _number_reply(self._gate_times[function].seconds)
+
+    def _set_autozero(self, word: str) -> None:
+        if word in ("ON", "1"):
+            self._autozero = Autozero.ON
+        elif word in ("OFF", "0", "ONCE"):
+            # ONCE takes one offset measurement now and then leaves Autozero off.
+            self._autozero = Autozero.OFF
+        else:
+            self._errors.append(_ILLEGAL_PARAMETER)
+
+    def _get_autozero(self) -> str:
+        return "1" if self._autozero is Autozero.ON else "0"
+
+    def _set_input_impedance(self, word: str) -> None:
+        if word in ("ON", "1"):
+            self._input_impedance = InputImpedance.HIGH_IMPEDANCE
+        elif word in ("OFF", "0"):
+            self._input_impedance = InputImpedance.TEN_MEGOHM
+        else:
+            self._errors.append(_ILLEGAL_PARAMETER)
+
+    def _get_input_impedance(self) -> str:
+        return "1" if self._input_impedance is InputImpedance.HIGH_IMPEDANCE else "0"
 
     def _set_range(self, function: Function, word: str) -> None:
         ranges = function.ranges
@@ -286,6 +394,14 @@ class Simulator:
             setup = setup.with_range(self._ranges.get(group))
         if function.has_integration_time:
             setup = setup.with_nplc(self._nplc[group])
+        if function.has_ac_filter:
+            setup = setup.with_ac_filter(self._ac_filter)
+        if function.has_gate_time:
+            setup = setup.with_gate_time(self._gate_times[function])
+        if function.has_autozero:
+            setup = setup.with_autozero(self._autozero)
+        if function.has_input_impedance:
+            setup = setup.with_input_impedance(self._input_impedance)
         return setup
 
     def _autorange(self, function: Function) -> float:

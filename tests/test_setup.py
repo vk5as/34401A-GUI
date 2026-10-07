@@ -142,8 +142,6 @@ def test_integration_time_does_not_apply_to_other_functions(function):
         (Function.AC_CURRENT, Resolution.SIX_HALF),
         (Function.CONTINUITY, Resolution.FIVE_HALF),
         (Function.DIODE, Resolution.FIVE_HALF),
-        (Function.FREQUENCY, Resolution.FIVE_HALF),
-        (Function.PERIOD, Resolution.FIVE_HALF),
     ],
 )
 def test_resolution_is_fixed_for_functions_that_cannot_change_it(function, fixed):
@@ -194,8 +192,8 @@ def test_ranges_are_labelled_with_engineering_prefixes(function, value, expected
             Setup.default(Function.RESISTANCE_4W).with_range(1e4).with_nplc(0.2),
             "4-wire Ω · 10 kΩ range · 5½ digits · 0.2 NPLC",
         ),
-        (Setup.default(Function.AC_VOLTAGE).with_range(0.1), "AC V · 100 mV range · 6½ digits"),
-        (Setup.default(Function.FREQUENCY), "Frequency · Autorange · 5½ digits"),
+        (Setup.default(Function.AC_VOLTAGE).with_range(0.1), "AC V · 100 mV range · 6½ digits · 20 Hz filter"),
+        (Setup.default(Function.FREQUENCY), "Frequency · Autorange · 5½ digits · 100 ms gate"),
         (Setup.default(Function.DIODE), "Diode · 5½ digits"),
     ],
 )

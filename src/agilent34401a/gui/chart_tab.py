@@ -8,6 +8,7 @@ import contextlib
 import logging
 import math
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import TYPE_CHECKING, Any
@@ -20,7 +21,7 @@ from matplotlib.figure import Figure
 
 from agilent34401a.gui.themes import LIGHT, Palette
 from agilent34401a.history import History, HistoryEntry
-from agilent34401a.meter import Reading, Resolution, format_reading
+from agilent34401a.meter import Reading, Resolution, Setup, format_reading
 from agilent34401a.settings import Settings, XAxis
 
 if TYPE_CHECKING:
@@ -188,12 +189,14 @@ class ChartTab(ttk.Frame):
 
     # --- History ------------------------------------------------------------------------------------------------
 
-    def add_reading(self, reading: Reading, timestamp: float) -> None:
+    def add_reading(
+        self, reading: Reading, timestamp: float, *, setup: Setup | None = None, taken_at: datetime | None = None
+    ) -> None:
         """Put a Reading in the History. The plot catches up on the next refresh."""
-        self.history.add(reading, timestamp)
+        self.history.add(reading, timestamp, setup=setup, taken_at=taken_at)
 
     def on_reading(self, taken: "ReadingTaken") -> None:
-        self.add_reading(taken.reading, taken.timestamp)
+        self.add_reading(taken.reading, taken.timestamp, setup=taken.setup, taken_at=taken.taken_at)
 
     def clear(self) -> None:
         """Forget every Reading, and show an empty chart straight away."""

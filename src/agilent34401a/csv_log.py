@@ -24,6 +24,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import TextIO, cast
 
+from agilent34401a.history import History
 from agilent34401a.meter import Reading, Setup
 
 COLUMNS = (
@@ -150,3 +151,24 @@ def write_csv(path: Path, items: Iterable[LoggedReading]) -> int:
         for item in items:
             writer.write(item)
         return writer.rows_written
+
+
+def export_history(history: History, path: Path) -> int:
+    """Save the Readings in `history` to a new CSV file at `path`; return how many rows it holds.
+
+    `elapsed_s` counts from the first Reading since the History was cleared, as the Chart's time axis does, even if
+    that Reading has since been forgotten. Raises `OSError` if the file cannot be written.
+    """
+    started_at = history.started_at
+    return write_csv(
+        path,
+        (
+            LoggedReading(
+                entry.reading,
+                elapsed_s=entry.timestamp - (entry.timestamp if started_at is None else started_at),
+                taken_at=entry.taken_at,
+                setup=entry.setup,
+            )
+            for entry in history
+        ),
+    )

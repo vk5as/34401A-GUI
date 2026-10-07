@@ -4,8 +4,9 @@ import argparse
 import math
 import sys
 from collections.abc import Callable, Sequence
+from functools import partial
 
-from agilent34401a import __version__
+from agilent34401a import __version__, cli_admin
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings, open_transport
 from agilent34401a.driver import Driver, QueuedError
@@ -42,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(title="commands", dest="command")
     # Each subcommand lives in its own _add_<name>_command and registers here with one line.
     _add_read_command(subparsers)
+    _add_admin_commands(subparsers)
 
     args = parser.parse_args(argv)
     handler: Callable[[argparse.Namespace], int] | None = getattr(args, "handler", None)
@@ -126,6 +128,38 @@ def _add_read_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentP
         choices=[resolution.value for resolution in Resolution],
         help="the Resolution in digits",
     )
+
+
+def _add_admin_commands(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Register `idn`, `reset`, `selftest` and `errors`; what they do lives in `cli_admin`."""
+    commands = (
+        ("idn", cli_admin.idn, "print the Meter's identity and firmware revision", None),
+        (
+            "reset",
+            cli_admin.reset,
+            "reset the Meter to its power-on Setup (*RST)",
+            "Reset the Meter. This is the only command that changes the Meter's Setup without being told what to change.",
+        ),
+        (
+            "selftest",
+            cli_admin.selftest,
+            "run the Meter's self-test (about 10 s)",
+            "Run the Meter's self-test, which takes about ten seconds. Exit code 0 means it passed.",
+        ),
+        (
+            "errors",
+            cli_admin.errors,
+            "print and clear the Meter's error queue",
+            "Print every error in the Meter's error queue, oldest first, which also empties it.",
+        ),
+    )
+    for name, action, summary, description in commands:
+        parser = add_command(subparsers, name, partial(_run_admin, action), summary=summary, description=description)
+        add_connection_options(parser)
+
+
+def _run_admin(action: Callable[[Driver], int], args: argparse.Namespace) -> int:
+    return run_on_meter(args, lambda driver, _transport: action(driver))
 
 
 def _run_read(args: argparse.Namespace) -> int:

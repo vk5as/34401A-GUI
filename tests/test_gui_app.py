@@ -645,11 +645,11 @@ def test_version_flag_prints_the_version_and_exits_successfully(capsys):
     assert __version__ in capsys.readouterr().out
 
 
-def test_the_window_starts_with_the_chart_as_its_only_tab(make_window):
+def test_the_tab_strip_is_shown_once_a_feature_has_added_its_tab(make_window):
     window = make_window()
 
-    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()] == ["Chart"]
     assert window.notebook.winfo_manager() == "pack"
+    assert "System" in [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()]
 
 
 def test_added_tabs_appear_in_order_under_their_titles(make_window):
@@ -658,7 +658,7 @@ def test_added_tabs_appear_in_order_under_their_titles(make_window):
     window.add_tab("Trigger", ttk.Frame(window.notebook))
     window.add_tab("Math", ttk.Frame(window.notebook))
 
-    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()] == ["Chart", "Trigger", "Math"]
+    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()][-2:] == ["Trigger", "Math"]
     assert window.notebook.winfo_manager() == "pack"
 
 

@@ -18,6 +18,15 @@ agilent34401a-cli read --resource "TCPIP::192.0.2.1::5025::SOCKET"   # any raw V
 agilent34401a-cli read --simulate                         # the built-in Simulator, no Meter needed
 ```
 
+The same Connection options work for the administration commands. Each exits with 0 on success and 1 on failure:
+
+```bash
+agilent34401a-cli idn --simulate        # print the Meter's identity and firmware revision
+agilent34401a-cli errors --simulate     # print and clear the Meter's error queue
+agilent34401a-cli selftest --simulate   # run the self-test (about 10 s on a real Meter); 1 if it fails
+agilent34401a-cli reset --simulate      # *RST: the only command that resets the Meter
+```
+
 To exercise the real pyvisa stack without a Meter, run the Simulator as a TCP server and point the CLI at it:
 
 ```bash

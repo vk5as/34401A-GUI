@@ -38,6 +38,7 @@ _AUTO_RANGE = "Auto"
 _FIXED = "Fixed"
 _NOT_APPLICABLE = "—"
 _FUNCTION_COLUMNS = 6
+_MENU_ORDER = ("File", "View", "Help")
 
 _VFD_BACKGROUND = "#06130f"
 _VFD_FOREGROUND = "#4dffc3"
@@ -89,6 +90,10 @@ class MainWindow:
         self._build_display()
         self._build_function_buttons()
         self._build_controls()
+        self.menubar = tk.Menu(
+            self.root, tearoff=False
+        )  # attached to the window by add_menu_command once it has an entry
+        self._menus: dict[str, tk.Menu] = {}
         self.notebook = ttk.Notebook(self.root)  # shown by add_tab once there is a tab to show
         self._has_tabs = False
         self._build_tabs()
@@ -151,6 +156,27 @@ class MainWindow:
 
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
+
+    def menu(self, name: str) -> tk.Menu:
+        """Return the menu called `name`, creating it in its usual place (File, View, Help, then any others)."""
+        existing = self._menus.get(name)
+        if existing is not None:
+            return existing
+        menu = tk.Menu(self.menubar, tearoff=False)
+        rank = _MENU_ORDER.index(name) if name in _MENU_ORDER else len(_MENU_ORDER)
+        position = sum(
+            1
+            for other in self._menus
+            if (_MENU_ORDER.index(other) if other in _MENU_ORDER else len(_MENU_ORDER)) <= rank
+        )
+        self.menubar.insert_cascade(position, label=name, menu=menu)
+        self._menus[name] = menu
+        self.root.configure(menu=self.menubar)
+        return menu
+
+    def add_menu_command(self, menu: str, label: str, command: Callable[[], None]) -> None:
+        """Add an entry to the menubar, creating the menu if needed. Entries keep the order they are added in."""
+        self.menu(menu).add_command(label=label, command=command)
 
     def add_tab(self, title: str, tab: tk.Widget) -> None:
         """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`."""

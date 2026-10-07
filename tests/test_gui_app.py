@@ -715,3 +715,60 @@ def test_a_window_without_settings_gets_defaults_that_are_never_saved(make_windo
 
     assert window.settings.path is None
     assert window.settings.theme is Theme.SYSTEM
+
+
+def test_a_menu_command_runs_when_its_entry_is_invoked(make_window):
+    window = make_window()
+    calls = []
+
+    window.add_menu_command("File", "Connect…", lambda: calls.append("connect"))
+
+    menu = window.menu("File")
+    assert menu.entrycget(0, "label") == "Connect…"
+    menu.invoke(0)
+    assert calls == ["connect"]
+
+
+def test_menus_appear_in_the_usual_order_however_they_are_added(make_window):
+    window = make_window()
+
+    window.add_menu_command("Help", "Shortcuts", lambda: None)
+    window.add_menu_command("File", "Connect…", lambda: None)
+    window.add_menu_command("View", "Compact", lambda: None)
+
+    labels = [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
+    assert labels == ["File", "View", "Help"]
+
+
+def test_entries_added_to_a_menu_keep_their_order(make_window):
+    window = make_window()
+
+    window.add_menu_command("File", "Connect…", lambda: None)
+    window.add_menu_command("File", "Disconnect", lambda: None)
+
+    menu = window.menu("File")
+    assert [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)] == ["Connect…", "Disconnect"]
+
+
+def test_a_window_without_menu_entries_shows_no_menubar(make_window):
+    window = make_window()
+
+    assert str(window.root.cget("menu")) == ""
+
+
+def test_adding_the_first_menu_entry_shows_the_menubar(make_window):
+    window = make_window()
+
+    window.add_menu_command("File", "Connect…", lambda: None)
+
+    assert str(window.root.cget("menu")) == str(window.menubar)
+
+
+def test_an_unusual_menu_name_goes_after_the_usual_ones(make_window):
+    window = make_window()
+
+    window.add_menu_command("Tools", "Something", lambda: None)
+    window.add_menu_command("Help", "Shortcuts", lambda: None)
+
+    labels = [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
+    assert labels == ["Help", "Tools"]

@@ -5,7 +5,19 @@ import re
 from dataclasses import dataclass
 
 from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, UnrecognisedIdentityError
-from agilent34401a.meter import NPLC_VALUES, Function, Reading, Setup, format_range, parse_reading
+from agilent34401a.meter import (
+    NPLC_VALUES,
+    AcFilter,
+    Autozero,
+    Function,
+    GateTime,
+    InputImpedance,
+    Reading,
+    Setup,
+    Terminals,
+    format_range,
+    parse_reading,
+)
 from agilent34401a.raw_scpi import analyse
 from agilent34401a.transport import BusLockout, Transport
 
@@ -109,10 +121,16 @@ class Driver:
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
         self._setup = Setup.default(Function.DC_VOLTAGE)
+        self._terminals = Terminals.FRONT
 
     @property
     def setup(self) -> Setup:
         return self._setup
+
+    @property
+    def terminals(self) -> Terminals:
+        """The Terminals the Meter last said were active; `read_terminals` asks again."""
+        return self._terminals
 
     def identify(self) -> Identity:
         """Ask the Meter who it is, rejecting anything that is not a 34401A."""
@@ -135,7 +153,8 @@ class Driver:
     def apply(self, setup: Setup) -> list[QueuedError]:
         """Send a Setup to the Meter, then drain its error queue (ADR-0005) and return what it complained about.
 
-        Settings go in a fixed order: Function, then Range, then Integration Time, which also sets Resolution.
+        Settings go in a fixed order: Function, then Range, then Integration Time or Gate Time (which also set the
+        Resolution), then the AC Filter, Autozero and Input Impedance.
         A non-empty result means the Meter may not be in `setup`; `read_setup` says what it is in.
         """
         function = setup.function
@@ -146,6 +165,14 @@ class Driver:
             write(f"{prefix}:RANG:AUTO ON" if setup.range is None else f"{prefix}:RANG {setup.range:g}")
         if setup.nplc is not None:
             write(f"{_SETTING_PREFIX[function]}:NPLC {setup.nplc:g}")
+        if setup.gate_time is not None:
+            write(f"{function.value}:APER {setup.gate_time.seconds:g}")
+        if setup.ac_filter is not None:
+            write(f"DET:BAND {setup.ac_filter.hertz}")
+        if setup.autozero is not None:
+            write(f"ZERO:AUTO {setup.autozero.value}")
+        if setup.input_impedance is not None:
+            write(f"INP:IMP:AUTO {'ON' if setup.input_impedance is InputImpedance.HIGH_IMPEDANCE else 'OFF'}")
         self._setup = setup
         return self.drain_errors()
 
@@ -171,6 +198,17 @@ class Driver:
             setup = setup.with_range(self._read_range(function))
         if function.has_integration_time:
             setup = setup.with_nplc(self._read_nplc(function))
+        if function.has_gate_time:
+            setup = setup.with_gate_time(self._read_gate_time(function))
+        if function.has_ac_filter:
+            setup = setup.with_ac_filter(self._read_ac_filter())
+        if function.has_autozero:
+            # The Meter never reports "once": it takes the one offset measurement and leaves Autozero off.
+            autozero = Autozero.ON if self._read_flag("ZERO:AUTO?") else Autozero.OFF
+            setup = setup.with_autozero(autozero)
+        if function.has_input_impedance:
+            impedance = InputImpedance.HIGH_IMPEDANCE if self._read_flag("INP:IMP:AUTO?") else InputImpedance.TEN_MEGOHM
+            setup = setup.with_input_impedance(impedance)
         self._setup = setup
         return setup
 
@@ -199,6 +237,16 @@ class Driver:
             self._transport.write(command)
         errors = tuple(self.drain_errors()) if analysis.changes_meter else ()
         return RawResult(reply, errors, analysis.changes_meter)
+
+    def read_terminals(self) -> Terminals:
+        """Ask the Meter which Terminals are active. Only the switch on its front panel can change that."""
+        reply = self._transport.query("ROUT:TERM?").strip().upper()
+        for terminals in Terminals:
+            if reply == terminals.value:
+                self._terminals = terminals
+                return terminals
+        message = f"Meter replied {reply!r} to ROUT:TERM?, which is not FRON or REAR"
+        raise MalformedReplyError(message)
 
     def drain_errors(self) -> list[QueuedError]:
         """Read the Meter's error queue until it is empty."""
@@ -339,6 +387,22 @@ class Driver:
             if math.isclose(value, candidate, rel_tol=1e-6):
                 return candidate
         message = f"Meter reported an Integration Time of {value:g} NPLC, which it does not have"
+        raise MalformedReplyError(message)
+
+    def _read_gate_time(self, function: Function) -> GateTime:
+        value = self._read_number(f"{function.value}:APER?")
+        for candidate in GateTime:
+            if math.isclose(value, candidate.seconds, rel_tol=1e-6):
+                return candidate
+        message = f"Meter reported a Gate Time of {value:g} s, which it does not have"
+        raise MalformedReplyError(message)
+
+    def _read_ac_filter(self) -> AcFilter:
+        value = self._read_number("DET:BAND?")
+        for candidate in AcFilter:
+            if math.isclose(value, candidate.hertz, rel_tol=1e-6):
+                return candidate
+        message = f"Meter reported an AC Filter of {value:g} Hz, which it does not have"
         raise MalformedReplyError(message)
 
     def _read_number(self, query: str) -> float:

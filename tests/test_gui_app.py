@@ -16,7 +16,7 @@ from agilent34401a import __version__
 from agilent34401a.errors import TransportError
 from agilent34401a.gui.app import main
 from agilent34401a.gui.main_window import NO_READING, MainWindow
-from agilent34401a.meter import Function, Resolution
+from agilent34401a.meter import Function, GateTime, Resolution
 from agilent34401a.settings import Settings, Theme
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.transport import Transport
@@ -428,8 +428,6 @@ def test_integration_time_is_disabled_for_functions_that_have_none(make_window, 
     [
         Function.AC_VOLTAGE,
         Function.AC_CURRENT,
-        Function.FREQUENCY,
-        Function.PERIOD,
         Function.CONTINUITY,
         Function.DIODE,
     ],
@@ -444,6 +442,27 @@ def test_resolution_is_disabled_for_functions_that_measure_at_a_fixed_one(make_w
 
     assert str(window.resolution_box.cget("state")) == "disabled"
     assert window.resolution_box.get() == function.fixed_resolution.label
+
+
+@pytest.mark.parametrize(
+    ("function", "resolution", "gate_time"),
+    [
+        (Function.FREQUENCY, Resolution.SIX_HALF, GateTime.ONE_SECOND),
+        (Function.PERIOD, Resolution.FOUR_HALF, GateTime.TEN_MILLISECONDS),
+    ],
+)
+def test_resolution_of_frequency_and_period_is_chosen_through_the_gate_time(
+    make_window, function, resolution, gate_time
+):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    window.function_buttons[function].invoke()
+    pump(window, lambda: window.function_label.cget("text") == function.label)
+    assert str(window.resolution_box.cget("state")) == "readonly"
+
+    choose(window, window.resolution_box, resolution.label)
+
+    pump(window, lambda: window.setup_label.cget("text").endswith(f"{gate_time.label} gate"))
 
 
 @pytest.mark.parametrize("function", [Function.CONTINUITY, Function.DIODE])

@@ -16,7 +16,7 @@ from functools import partial
 
 from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
 from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, MeterError, TransportTimeoutError
-from agilent34401a.meter import Function, Reading, Setup, reading_timeout
+from agilent34401a.meter import Function, Reading, Setup, Terminals, reading_timeout
 from agilent34401a.transport import Transport
 
 _LOG = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class Connected:
 
     identity: Identity
     setup: Setup
+    terminals: Terminals = Terminals.FRONT
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,13 @@ class SetupChanged:
     """The Meter's Setup, read back after a change; it differs from the one asked for if the Meter refused part."""
 
     setup: Setup
+
+
+@dataclass(frozen=True)
+class TerminalsChanged:
+    """The Meter's front/rear switch was found in a different position than before (checked after Setup changes)."""
+
+    terminals: Terminals
 
 
 @dataclass(frozen=True)
@@ -160,6 +168,7 @@ Event = (
     | ConnectionFailed
     | ReadingTaken
     | SetupChanged
+    | TerminalsChanged
     | ErrorsReported
     | RawReplied
     | RawRefused
@@ -334,11 +343,12 @@ class Worker:
                 driver = Driver(transport)
                 identity = driver.identify()
                 setup = driver.read_setup()
+                terminals = driver.read_terminals()
                 transport.timeout = reading_timeout(setup)
             except MeterError as error:
                 self._events.put(ConnectionFailed(str(error)))
                 return
-            self._events.put(Connected(identity, setup))
+            self._events.put(Connected(identity, setup, terminals))
             self._serve(driver, transport)
         except Exception as error:  # noqa: BLE001 - the worker must never die silently; the UI reports it
             _LOG.exception("The Worker failed unexpectedly")
@@ -432,6 +442,8 @@ class Worker:
         try:
             errors = change()
             actual = driver.read_setup()
+            before = driver.terminals
+            terminals = driver.read_terminals()
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not change the Setup, resynchronising the Connection: %s", error)
             self._events.put(SetupFailed(str(error)))
@@ -439,6 +451,8 @@ class Worker:
             return
         transport.timeout = reading_timeout(actual)
         self._events.put(SetupChanged(actual))
+        if terminals is not before:
+            self._events.put(TerminalsChanged(terminals))
         if errors:
             _LOG.warning("The Meter queued errors after a Setup change: %s", errors)
             self._events.put(ErrorsReported(tuple(errors)))

@@ -19,12 +19,13 @@ python3 -m venv .venv
 ### Code quality
 
 ```bash
-.venv/bin/black --check src tests            # formatting
-.venv/bin/ruff check src tests               # linting (all rules enabled)
+.venv/bin/black --check src tests scripts    # formatting
+.venv/bin/ruff check src tests scripts       # linting (all rules enabled)
 .venv/bin/mypy                               # strict type checking
 .venv/bin/bandit -c pyproject.toml -r src    # security scan
 .venv/bin/pip-audit .                        # runtime dependency vulnerabilities
 .venv/bin/pytest                             # tests (use xvfb-run -a on a headless box)
+.venv/bin/python scripts/ci_smoke_test.py    # builds the GUI against the Simulator and shuts it down (xvfb-run -a if headless)
 .venv/bin/coverage report --omit="*/agilent34401a/gui/*" --fail-under=85   # coverage gate (GUI excluded)
 ```
 

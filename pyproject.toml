@@ -110,13 +110,17 @@ ignore = [
     "SLF001",  # tests may exercise private helpers
 ]
 
+"scripts/**" = [
+    "INP001", # standalone scripts run directly, they are not a package
+]
+
 [tool.ruff.lint.isort]
 known-first-party = ["agilent34401a"]
 
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 

@@ -2,17 +2,16 @@
 
 import argparse
 import tkinter as tk
-from collections.abc import Sequence
-from tkinter import ttk
+from collections.abc import Callable, Sequence
 
 from agilent34401a import __version__
+from agilent34401a.gui.main_window import MainWindow
+from agilent34401a.sim import Simulator
+from agilent34401a.transport import Transport
 
 
-def create_window() -> tk.Tk:
-    root = tk.Tk()
-    root.title(f"Agilent 34401A {__version__}")
-    ttk.Label(root, text="Agilent 34401A remote control").pack(padx=24, pady=24)
-    return root
+def create_window(open_transport: Callable[[], Transport], resource: str) -> MainWindow:
+    return MainWindow(tk.Tk(), open_transport, resource)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -21,6 +20,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Graphical remote control for the Agilent/HP 34401A digital multimeter.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.parse_args(argv)
-    create_window().mainloop()
+    parser.add_argument("--simulate", action="store_true", help="use the built-in Simulator instead of a Meter")
+    args = parser.parse_args(argv)
+    if not args.simulate:
+        # The connection dialog (Backend, resource, serial parameters) arrives with its own issue.
+        parser.error("only the Simulator is available so far; pass --simulate")
+    window = create_window(Simulator, "Simulator")
+    try:
+        window.root.mainloop()
+    finally:
+        window.stop()
     return 0

@@ -3,14 +3,14 @@ import re
 import threading
 import time
 import tkinter as tk
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from tkinter import ttk
 
 import pytest
 
 from agilent34401a import __version__
 from agilent34401a.errors import TransportError
-from agilent34401a.gui.app import create_window, main
+from agilent34401a.gui.app import main
 from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, Resolution
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
@@ -63,25 +63,53 @@ def pump_for(window: MainWindow, seconds: float) -> None:
     pump(window, lambda: time.monotonic() >= deadline)
 
 
+_TK_START_ATTEMPTS = 3
+
+
+@pytest.fixture(scope="session")
+def tk_root() -> Iterator[tk.Tk]:
+    """One Tk interpreter for the whole run, with each test getting its own Toplevel on it.
+
+    Creating a fresh interpreter per test made Windows CI fail now and then with "Can't find a usable init.tcl".
+    """
+    root = None
+    for attempt in range(_TK_START_ATTEMPTS):
+        try:
+            root = tk.Tk()
+            break
+        except tk.TclError:
+            # CI always has a display (xvfb on Linux), so a missing one there is a failure, not a skip.
+            if attempt == _TK_START_ATTEMPTS - 1:
+                if os.environ.get("CI"):
+                    raise
+                pytest.skip("no display available")
+            time.sleep(0.5)
+    assert root is not None
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
 @pytest.fixture
-def make_window():
+def make_window(tk_root):
     windows: list[MainWindow] = []
 
     def make(simulator: Simulator | None = None, *, opener: Callable[[], Transport] | None = None) -> MainWindow:
         meter = simulator if simulator is not None else Simulator()
-        try:
-            window = create_window(opener or (lambda: meter), "Simulator")
-        except tk.TclError:
-            # CI always has a display (xvfb on Linux), so a missing one there is a failure, not a skip.
-            if os.environ.get("CI"):
-                raise
-            pytest.skip("no display available")
+        window = MainWindow(tk.Toplevel(tk_root), opener or (lambda: meter), "Simulator")
         windows.append(window)
         return window
 
     yield make
     for window in windows:
         window.close()
+
+
+def _exists(widget: tk.Misc) -> bool:
+    try:
+        return bool(widget.winfo_exists())
+    except tk.TclError:  # the whole application is gone
+        return False
 
 
 def connected(window: MainWindow) -> bool:
@@ -600,8 +628,7 @@ def test_closing_the_window_shuts_the_worker_down_and_closes_the_transport(make_
     assert window.worker_is_alive() is False
     with pytest.raises(TransportError):
         simulator.query("*IDN?")
-    with pytest.raises(tk.TclError):
-        window.root.winfo_exists()
+    assert not _exists(window.root)
 
 
 def test_closing_twice_is_harmless(make_window):

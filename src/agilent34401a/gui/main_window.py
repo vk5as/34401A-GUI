@@ -54,7 +54,7 @@ def _vfd_label(parent: tk.Frame, text: str, font: tkfont.Font, *, anchor: Litera
 class MainWindow:
     """Shows Continuous Readings from one Meter. All Meter traffic goes through its Worker thread (ADR-0002)."""
 
-    def __init__(self, root: tk.Tk, open_transport: Callable[[], Transport], resource: str) -> None:
+    def __init__(self, root: tk.Tk | tk.Toplevel, open_transport: Callable[[], Transport], resource: str) -> None:
         self.root = root
         self._resource = resource
         self._events: queue.Queue[Event] = queue.Queue()

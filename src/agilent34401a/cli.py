@@ -3,7 +3,7 @@
 import argparse
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from agilent34401a import __version__
 from agilent34401a.backend import Backend
@@ -40,13 +40,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(title="commands", dest="command")
-    read_parser = subparsers.add_parser(
-        "read",
-        help="take one Reading and print it",
-        description="Take one Reading. Options you leave out keep the Meter's current Setup.",
-    )
-    read_parser.add_argument("--simulate", action="store_true", help="use the built-in Simulator instead of a Meter")
-    connection = read_parser.add_argument_group(
+    # Each subcommand lives in its own _add_<name>_command and registers here with one line.
+    _add_read_command(subparsers)
+
+    args = parser.parse_args(argv)
+    handler: Callable[[argparse.Namespace], int] | None = getattr(args, "handler", None)
+    if handler is None:
+        parser.print_help()
+        return 0
+    return handler(args)
+
+
+def add_connection_options(parser: argparse.ArgumentParser) -> None:
+    """Add `--simulate` and the Connection options every subcommand that talks to a Meter shares."""
+    parser.add_argument("--simulate", action="store_true", help="use the built-in Simulator instead of a Meter")
+    connection = parser.add_argument_group(
         "Connection", "Which Meter to talk to; the default is GPIB board 0, address 22."
     )
     connection.add_argument(
@@ -57,33 +65,74 @@ def main(argv: Sequence[str] | None = None) -> int:
     connection.add_argument("--gpib-board", type=int, help="the GPIB board index (default 0)")
     connection.add_argument("--gpib-address", type=int, help="the Meter's GPIB address (default 22)")
     connection.add_argument("--resource", help="a raw VISA resource string, instead of the GPIB board and address")
-    read_parser.add_argument(
+
+
+def add_command(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    name: str,
+    handler: Callable[[argparse.Namespace], int],
+    *,
+    summary: str,
+    description: str | None = None,
+) -> argparse.ArgumentParser:
+    """Register a subcommand whose `handler` receives the parsed arguments and returns the exit code."""
+    parser = subparsers.add_parser(name, help=summary, description=description or summary)
+    parser.set_defaults(handler=handler, parser=parser)
+    return parser
+
+
+def run_on_meter(args: argparse.Namespace, action: Callable[[Driver, Transport], int]) -> int:
+    """Connect as `args` ask, identify the Meter, run `action`, and always close the Transport.
+
+    A failure talking to the Meter is printed on stderr and gives exit code 1; the Transport is closed either way.
+    """
+    settings = _connection_settings(args, args.parser)
+    try:
+        transport = Simulator() if settings is None else open_transport(settings)
+    except MeterError as error:
+        sys.stderr.write(f"{_PROG}: error: {error}\n")
+        return 1
+    try:
+        driver = Driver(transport)
+        driver.identify()
+        return action(driver, transport)
+    except MeterError as error:
+        sys.stderr.write(f"{_PROG}: error: {error}\n")
+        return 1
+    finally:
+        transport.close()
+
+
+def _add_read_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "read",
+        _run_read,
+        summary="take one Reading and print it",
+        description="Take one Reading. Options you leave out keep the Meter's current Setup.",
+    )
+    add_connection_options(parser)
+    parser.add_argument(
         "--function",
         choices=sorted(_FUNCTIONS),
         help="the Function to measure; it keeps its own Range and Resolution unless those are given too",
     )
-    read_parser.add_argument(
+    parser.add_argument(
         "--range", dest="range_", metavar="RANGE", help=f"the Range in volts, amps or ohms, or '{_AUTO}' for Autorange"
     )
-    read_parser.add_argument(
+    parser.add_argument(
         "--resolution",
         type=float,
         choices=[resolution.value for resolution in Resolution],
         help="the Resolution in digits",
     )
 
-    args = parser.parse_args(argv)
-    if args.command == "read":
-        range_ = _parse_range(args.range_, read_parser)
-        settings = _connection_settings(args, read_parser)
-        try:
-            transport = Simulator() if settings is None else open_transport(settings)
-        except MeterError as error:
-            sys.stderr.write(f"{_PROG}: error: {error}\n")
-            return 1
-        return _read(transport, args.function, range_, args.resolution)
-    parser.print_help()
-    return 0
+
+def _run_read(args: argparse.Namespace) -> int:
+    range_ = _parse_range(args.range_, args.parser)
+    return run_on_meter(
+        args, lambda driver, transport: _read(driver, transport, args.function, range_, args.resolution)
+    )
 
 
 def _connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ConnectionSettings | None:
@@ -128,27 +177,21 @@ def _parse_range(text: str | None, parser: argparse.ArgumentParser) -> float | s
     return value
 
 
-def _read(transport: Transport, function: str | None, range_: float | str | None, digits: float | None) -> int:
-    try:
-        driver = Driver(transport)
-        driver.identify()
-        if function is not None and _report(driver.select_function(_FUNCTIONS[function])):
-            return 1
-        current = driver.read_setup()
-        try:
-            wanted = _wanted_setup(current, range_, digits)
-        except InvalidSetupError as error:
-            sys.stderr.write(f"{_PROG}: error: {error}\n")
-            return _USAGE_ERROR
-        if wanted != current and _report(driver.apply(wanted)):
-            return 1
-        transport.timeout = reading_timeout(driver.setup)
-        sys.stdout.write(f"{format_reading(driver.read(), driver.setup.resolution)}\n")
-    except MeterError as error:
-        sys.stderr.write(f"{_PROG}: error: {error}\n")
+def _read(
+    driver: Driver, transport: Transport, function: str | None, range_: float | str | None, digits: float | None
+) -> int:
+    if function is not None and _report(driver.select_function(_FUNCTIONS[function])):
         return 1
-    finally:
-        transport.close()
+    current = driver.read_setup()
+    try:
+        wanted = _wanted_setup(current, range_, digits)
+    except InvalidSetupError as error:
+        sys.stderr.write(f"{_PROG}: error: {error}\n")
+        return _USAGE_ERROR
+    if wanted != current and _report(driver.apply(wanted)):
+        return 1
+    transport.timeout = reading_timeout(driver.setup)
+    sys.stdout.write(f"{format_reading(driver.read(), driver.setup.resolution)}\n")
     return 0
 
 

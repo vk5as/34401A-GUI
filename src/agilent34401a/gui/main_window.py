@@ -7,13 +7,15 @@ from collections.abc import Callable
 from functools import partial
 from tkinter import font as tkfont
 from tkinter import ttk
-from typing import Literal
+from typing import Any, Literal
 
 from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
+from agilent34401a.gui.shortcuts import Shortcuts
+from agilent34401a.gui.themes import ERROR_STYLE, Palette, apply_theme, style_menu
 from agilent34401a.meter import NPLC_VALUES, Function, Resolution, Setup, describe_setup, format_range, format_reading
 from agilent34401a.rate import ReadingRate
-from agilent34401a.settings import Settings
+from agilent34401a.settings import Settings, Theme
 from agilent34401a.transport import Transport
 from agilent34401a.worker import (
     Connected,
@@ -39,6 +41,13 @@ _FIXED = "Fixed"
 _NOT_APPLICABLE = "—"
 _FUNCTION_COLUMNS = 6
 _MENU_ORDER = ("File", "View", "Help")
+# Shortcuts for features that arrive later; each shows as unavailable in Help until its feature registers it.
+_PLANNED_SHORTCUTS = (
+    ("Space", "Take a single Reading"),
+    ("Ctrl+L", "Start or stop recording"),
+    ("Ctrl+K", "Open the SCPI console"),
+    ("Ctrl+,", "Open Settings"),
+)
 
 _VFD_BACKGROUND = "#06130f"
 _VFD_FOREGROUND = "#4dffc3"
@@ -87,6 +96,7 @@ class MainWindow:
         self._poll_id = root.after(_POLL_MS, self._drain)
 
     def _build(self) -> None:
+        self._theme_callbacks: list[Callable[[Palette], None]] = []
         self._build_display()
         self._build_function_buttons()
         self._build_controls()
@@ -94,10 +104,15 @@ class MainWindow:
             self.root, tearoff=False
         )  # attached to the window by add_menu_command once it has an entry
         self._menus: dict[str, tk.Menu] = {}
+        self.palette = apply_theme(self.root, self.settings.theme)
+        style_menu(self.menubar, self.palette)
         self.notebook = ttk.Notebook(self.root)  # shown by add_tab once there is a tab to show
         self._has_tabs = False
         self._build_tabs()
         self._build_status_bar()
+        self._build_view_menu()
+        self._layout()
+        self._build_shortcuts()
 
     def _build_display(self) -> None:
         display = tk.Frame(self.root, bg=_VFD_BACKGROUND, padx=24, pady=12)
@@ -114,6 +129,7 @@ class MainWindow:
         self.function_label = _vfd_label(display, Function.DC_VOLTAGE.label, fonts["function"], anchor="w")
         self.setup_label = _vfd_label(display, "", fonts["setup"], anchor="w")
         self.readout = _vfd_label(display, NO_READING, fonts["readout"], anchor="center")
+        self._display = display
 
     def _build_function_buttons(self) -> None:
         frame = ttk.Frame(self.root, padding=(8, 8, 8, 0))
@@ -138,20 +154,26 @@ class MainWindow:
     def _build_controls(self) -> None:
         controls = ttk.Frame(self.root, padding=8)
         controls.pack(fill="x")
+        self._controls = controls
+        self._control_items: list[tuple[tk.Widget, dict[str, Any], bool]] = []  # widget, pack options, in compact mode
         self.run_button = ttk.Button(controls, text="Run", command=self._toggle_run, state="disabled")
-        self.run_button.pack(side="left", padx=(0, 12))
-        self.range_box = self._combobox(controls, "Range", self._on_range)
-        self.resolution_box = self._combobox(controls, "Resolution", self._on_resolution)
-        self.nplc_box = self._combobox(controls, "Integration Time", self._on_nplc)
+        self._add_control(self.run_button, {"side": "left", "padx": (0, 12)}, compact=False)
+        self.range_box = self._combobox(controls, "Range", self._on_range, compact=True)
+        self.resolution_box = self._combobox(controls, "Resolution", self._on_resolution, compact=False)
+        self.nplc_box = self._combobox(controls, "Integration Time", self._on_nplc, compact=False)
         self._raw = tk.BooleanVar(value=False)
         self.raw_check = ttk.Checkbutton(controls, text="Raw Reading", variable=self._raw, command=self._render_readout)
-        self.raw_check.pack(side="left", padx=(12, 0))
+        self._add_control(self.raw_check, {"side": "left", "padx": (12, 0)}, compact=False)
 
-    def _combobox(self, parent: ttk.Frame, title: str, handler: Callable[[], None]) -> ttk.Combobox:
-        ttk.Label(parent, text=title).pack(side="left", padx=(0, 4))
+    def _add_control(self, widget: tk.Widget, options: dict[str, Any], *, compact: bool) -> None:
+        self._control_items.append((widget, options, compact))
+        widget.pack(**options)
+
+    def _combobox(self, parent: ttk.Frame, title: str, handler: Callable[[], None], *, compact: bool) -> ttk.Combobox:
+        self._add_control(ttk.Label(parent, text=title), {"side": "left", "padx": (0, 4)}, compact=compact)
         box = ttk.Combobox(parent, state="disabled", width=10)
         box.bind("<<ComboboxSelected>>", lambda _event: handler())
-        box.pack(side="left", padx=(0, 12))
+        self._add_control(box, {"side": "left", "padx": (0, 12)}, compact=compact)
         return box
 
     def _build_tabs(self) -> None:
@@ -169,6 +191,7 @@ class MainWindow:
             for other in self._menus
             if (_MENU_ORDER.index(other) if other in _MENU_ORDER else len(_MENU_ORDER)) <= rank
         )
+        style_menu(menu, self.palette)
         self.menubar.insert_cascade(position, label=name, menu=menu)
         self._menus[name] = menu
         self.root.configure(menu=self.menubar)
@@ -178,12 +201,115 @@ class MainWindow:
         """Add an entry to the menubar, creating the menu if needed. Entries keep the order they are added in."""
         self.menu(menu).add_command(label=label, command=command)
 
+    def _build_view_menu(self) -> None:
+        themes = tk.Menu(self.menu("View"), tearoff=False)
+        self._theme_var = tk.StringVar(value=self.settings.theme.value)
+        for theme in (Theme.LIGHT, Theme.DARK, Theme.SYSTEM):
+            themes.add_radiobutton(
+                label=theme.value.capitalize(),
+                value=theme.value,
+                variable=self._theme_var,
+                command=partial(self.set_theme, theme),
+            )
+        self._theme_menu = themes
+        style_menu(themes, self.palette)
+        self._compact_var = tk.BooleanVar(value=self.settings.compact_mode)
+        self.menu("View").add_checkbutton(
+            label="Compact mode",
+            variable=self._compact_var,
+            command=lambda: self.set_compact(compact=self._compact_var.get()),
+        )
+        self.menu("View").add_cascade(label="Theme", menu=themes)
+
+    def set_compact(self, *, compact: bool) -> None:
+        """Show only the readout, Function buttons and Range (or everything again), and remember the choice."""
+        self.settings.compact_mode = compact
+        self._compact_var.set(compact)
+        self.settings.save()
+        self._layout()
+        self.root.geometry("")  # let the window shrink or grow to fit what is shown
+
+    def _layout(self) -> None:
+        """Show the parts of the window that belong to the current mode, each in its usual place."""
+        compact = self.settings.compact_mode
+        for widget, _options, _in_compact in self._control_items:
+            widget.pack_forget()
+        for widget, options, in_compact in self._control_items:
+            if in_compact or not compact:
+                widget.pack(**options)
+        self.setup_label.pack_forget()
+        if not compact:
+            self.setup_label.pack(before=self.readout, fill="x")
+        self.notebook.pack_forget()
+        if self._has_tabs and not compact:
+            self.notebook.pack(after=self._controls, fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def set_theme(self, theme: Theme) -> None:
+        """Switch to `theme` now, remember the choice, and tell the `on_theme_changed` callbacks."""
+        self.palette = apply_theme(self.root, theme)
+        self.settings.theme = theme
+        self._theme_var.set(theme.value)
+        self.settings.save()
+        for menu in (*self._menus.values(), self._theme_menu, self.menubar):
+            style_menu(menu, self.palette)
+        for callback in self._theme_callbacks:
+            callback(self.palette)
+
+    def on_theme_changed(self, callback: Callable[[Palette], None]) -> None:
+        """Call `callback` with the current Palette now and again whenever the theme changes.
+
+        ttk widgets follow the theme through their styles; use this for anything that does not, such as a chart.
+        """
+        self._theme_callbacks.append(callback)
+        callback(self.palette)
+
+    def _build_shortcuts(self) -> None:
+        self.shortcuts = Shortcuts(self.root)
+        for index, function in enumerate(Function, start=1):
+            self.register_shortcut(f"F{index}", f"Select {function.label}", partial(self._on_function, function))
+        self.register_shortcut("R", "Run or pause Continuous Readings", self._shortcut_run)
+        for sequence, description in _PLANNED_SHORTCUTS:
+            self.shortcuts.plan(sequence, description)
+        self.add_menu_command("Help", "Shortcuts", self.show_shortcuts)
+        self.shortcuts_dialog: tk.Toplevel | None = None
+
+    def register_shortcut(self, sequence: str, description: str, handler: Callable[[], None]) -> None:
+        """Bind a key (written like "F5", "Space", "R", "Ctrl+L") to `handler` and list it in Help → Shortcuts.
+
+        A planned shortcut (Space, Ctrl+L, Ctrl+K, Ctrl+,) becomes available when its feature registers it. Keys
+        without Ctrl or Alt do nothing while a text field has focus.
+        """
+        self.shortcuts.register(sequence, description, handler)
+
+    def show_shortcuts(self) -> None:
+        """Open (or raise) the window listing every shortcut, marking the ones not available yet."""
+        if self.shortcuts_dialog is not None and self.shortcuts_dialog.winfo_exists():
+            self.shortcuts_dialog.lift()
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Shortcuts")
+        dialog.transient(self.root)
+        table = ttk.Treeview(dialog, columns=("shortcut", "action", "status"), show="headings", height=16)
+        for column, title, width in (("shortcut", "Shortcut", 90), ("action", "Action", 280), ("status", "", 110)):
+            table.heading(column, text=title)
+            table.column(column, width=width, anchor="w")
+        for shortcut in self.shortcuts.entries():
+            status = "" if shortcut.available else "planned, not available yet"
+            table.insert("", "end", values=(shortcut.sequence, shortcut.description, status))
+        table.pack(fill="both", expand=True, padx=8, pady=8)
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=(0, 8))
+        self.shortcuts_table = table
+        self.shortcuts_dialog = dialog
+
+    def _shortcut_run(self) -> None:
+        if str(self.run_button.cget("state")) != "disabled":
+            self._toggle_run()
+
     def add_tab(self, title: str, tab: tk.Widget) -> None:
         """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`."""
-        if not self._has_tabs:
-            self.notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-            self._has_tabs = True
+        self._has_tabs = True
         self.notebook.add(tab, text=title)
+        self._layout()
 
     def _build_status_bar(self) -> None:
         status = ttk.Frame(self.root, relief="sunken", padding=(6, 2))
@@ -191,7 +317,7 @@ class MainWindow:
         self.status_connection = ttk.Label(status, text="Connecting…")
         self.status_identity = ttk.Label(status, text="")
         self.status_message = ttk.Label(status, text="")
-        self.status_error = ttk.Label(status, text="", foreground="#b00020")
+        self.status_error = ttk.Label(status, text="", style=ERROR_STYLE)
         self.status_rate = ttk.Label(status, text="", anchor="e")
         self.status_connection.pack(side="left", padx=(0, 12))
         self.status_identity.pack(side="left", padx=(0, 12))
@@ -212,6 +338,10 @@ class MainWindow:
     def stop(self) -> None:
         """Shut the Worker down and stop polling it, leaving the window itself alone."""
         self._closed = True
+        # Handlers are usually bound methods of this window; dropping them frees the window (and its Tk variables) as
+        # soon as the last reference goes, in this thread, rather than whenever the cycle collector runs in another.
+        self.shortcuts.clear()
+        self._theme_callbacks.clear()
         if self._poll_id is not None:
             self.root.after_cancel(self._poll_id)
             self._poll_id = None
@@ -251,7 +381,7 @@ class MainWindow:
         self._worker.apply_setup(wanted)
 
     def _on_function(self, function: Function) -> None:
-        if self._setup is None or self._busy:
+        if self._setup is None or self._busy or self._ended:
             return
         self._begin_change()
         self._worker.select_function(function)

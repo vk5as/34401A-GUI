@@ -591,7 +591,9 @@ def test_a_read_only_calibration_query_needs_no_override(started):
 
     worker.send_raw("CAL:COUN?")
 
-    assert isinstance(next_event(events), RawFailed)  # the Simulator has no calibration count, but it was asked
+    replied = next_event(events)
+    assert isinstance(replied, RawReplied)
+    assert replied.reply == "+1"
     assert "CAL:COUN?" in simulator.writes
 
 

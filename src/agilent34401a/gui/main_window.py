@@ -14,6 +14,7 @@ from agilent34401a.errors import InvalidSetupError
 from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.gui.shortcuts import Shortcuts
+from agilent34401a.gui.system_tab import SystemTab
 from agilent34401a.gui.themes import ERROR_STYLE, Palette, apply_theme, style_menu
 from agilent34401a.meter import NPLC_VALUES, Function, Resolution, Setup, describe_setup, format_range, format_reading
 from agilent34401a.rate import ReadingRate
@@ -79,7 +80,8 @@ class MainWindow:
         self.settings = settings if settings is not None else Settings.in_memory()
         self._resource = resource
         self._events: queue.Queue[Event] = queue.Queue()
-        self._worker = Worker(open_transport, self._events)
+        self._worker = Worker(open_transport, self._events, error_check_interval_s=self.settings.error_check_interval_s)
+        self._event_handlers: list[Callable[[Event], None]] = []
         self._rate = ReadingRate()
         self._running = False
         self._connected = False
@@ -89,7 +91,6 @@ class MainWindow:
         self._poll_id: str | None = None
         self._setup: Setup | None = None  # what the Meter last reported it is doing
         self._last: ReadingTaken | None = None  # the Reading on the readout
-        self._event_listeners: list[Callable[[Event], None]] = []
         self._tabs: dict[str, tuple[tk.Widget, tk.Widget | None]] = {}  # title -> (tab, widget to focus on show)
 
         root.title(f"Agilent 34401A {__version__}")
@@ -182,6 +183,7 @@ class MainWindow:
 
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
+        self._add_system_tab()
         # The console holds the Worker, not the window: a reference cycle through the window would leave Tk variables
         # to be freed by whichever thread the garbage collector happens to run on.
         worker = self._worker
@@ -189,11 +191,21 @@ class MainWindow:
             self.notebook, lambda command, allow: worker.send_raw(command, allow_calibration=allow)
         )
         self.add_tab(CONSOLE_TITLE, self.console.frame, focus=self.console.entry)
-        self.add_event_listener(self.console.handle_event)
+        self.add_event_handler(self.console.handle_event)
 
-    def add_event_listener(self, listener: Callable[[Event], None]) -> None:
-        """Call `listener` with every event the Worker reports, on the Tk thread, for a tab that shows its own."""
-        self._event_listeners.append(listener)
+    def _add_system_tab(self) -> None:
+        tab = self.system_tab = SystemTab(self.notebook, self._worker)
+        self.add_event_handler(tab.handle)
+        self.add_tab("System", tab)
+
+    @property
+    def worker(self) -> Worker:
+        """The Worker that owns the Connection; tabs send their requests to it."""
+        return self._worker
+
+    def add_event_handler(self, handler: Callable[[Event], None]) -> None:
+        """Have `handler` called, on the Tk thread, with every event the Worker reports (after the window's own)."""
+        self._event_handlers.append(handler)
 
     def menu(self, name: str) -> tk.Menu:
         """Return the menu called `name`, creating it in its usual place (File, View, Help, then any others)."""
@@ -372,7 +384,6 @@ class MainWindow:
         # Handlers are usually bound methods of this window; dropping them frees the window (and its Tk variables) as
         # soon as the last reference goes, in this thread, rather than whenever the cycle collector runs in another.
         self.shortcuts.clear()
-        self._event_listeners.clear()
         self._theme_callbacks.clear()
         if self._poll_id is not None:
             self.root.after_cancel(self._poll_id)
@@ -442,8 +453,11 @@ class MainWindow:
         self._poll_id = self.root.after(_POLL_MS, self._drain)
 
     def _handle(self, event: Event) -> None:
-        for listener in self._event_listeners:
-            listener(event)
+        self._handle_in_window(event)
+        for handler in self._event_handlers:
+            handler(event)
+
+    def _handle_in_window(self, event: Event) -> None:
         match event:
             case ReadingTaken(timestamp=timestamp):
                 self._last = event

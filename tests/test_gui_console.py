@@ -64,6 +64,7 @@ def test_a_query_typed_into_the_console_shows_the_command_and_the_meters_reply(m
 def test_the_return_key_sends_the_command(make_window):  # noqa: F811
     window = make_window(Simulator(identity=AGILENT_IDENTITY))
     pump(window, lambda: connected(window))
+    window.show_tab("SCPI console")
     window.console.entry.insert(0, "*IDN?")
     window.console.entry.focus_force()
     window.root.update()
@@ -124,7 +125,7 @@ def test_a_calibration_write_is_refused_and_never_sent_unless_the_override_is_ti
 
     send(window, "CAL:STR 'x'")
     pump(window, shows(window.console, "Refused:"))
-    assert not any("CAL" in command for command in simulator.commands)
+    assert not any(command.startswith("CAL:STR '") for command in simulator.commands)
 
     window.console.allow_calibration.set(value=True)
     send(window, "CAL:STR 'x'")
@@ -136,11 +137,11 @@ def test_a_read_only_calibration_query_needs_no_override(make_window):  # noqa: 
     window = make_window(simulator)
     pump(window, lambda: connected(window))
 
-    send(window, "CAL:COUN?")
+    send(window, "CAL:STR?")
 
-    pump(window, lambda: "CAL:COUN?" in simulator.commands)
-    pump(window, shows(window.console, "Failed:"))  # the Simulator has no calibration count, but it was asked
+    pump(window, lambda: len(window.console.text.splitlines()) >= 2)  # the command and the Meter's reply
     assert "Refused" not in window.console.text
+    assert "CAL:STR?" in simulator.commands
 
 
 def test_a_blank_command_is_not_sent(make_window):  # noqa: F811
@@ -182,6 +183,7 @@ def test_the_up_and_down_keys_recall_commands(make_window):  # noqa: F811
     pump(window, lambda: connected(window))
     send(window, "*IDN?")
     send(window, "FUNC?")
+    window.show_tab("SCPI console")
     window.console.entry.focus_force()
     window.root.update()
 

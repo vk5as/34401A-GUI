@@ -58,9 +58,10 @@ def _visa_errors() -> Iterator[None]:
 class VisaTransport:
     """A Transport over one open pyvisa resource. It owns the resource and its manager."""
 
-    def __init__(self, resource: _Resource, manager: _Manager) -> None:
+    def __init__(self, resource: _Resource, manager: _Manager, *, gpib: bool = False) -> None:
         self._resource = resource
         self._manager = manager
+        self._gpib = gpib
         self._closed = False
         self.timeout = _DEFAULT_TIMEOUT_S
 
@@ -91,6 +92,25 @@ class VisaTransport:
         self._require_open()
         with _visa_errors():
             self._resource.clear()
+
+    def set_local_lockout(self, *, locked: bool) -> bool:
+        """Send the GPIB local lockout message, or release it; False on any other bus, which has no such message.
+
+        Releasing sends GTL with REN deasserted, then asserts REN again so the next command finds the Meter in Remote.
+        """
+        control = getattr(self._resource, "gpib_control_ren", None)
+        if not self._gpib or not callable(control):
+            return False
+        self._require_open()
+        operations = (
+            [constants.RENLineOperation.asrt_llo]
+            if locked
+            else [constants.RENLineOperation.deassert_gtl, constants.RENLineOperation.asrt]
+        )
+        with _visa_errors():
+            for operation in operations:
+                control(operation)
+        return True
 
     def close(self) -> None:
         if self._closed:
@@ -144,7 +164,7 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
         _release(resource, manager)
         message = f"Could not open {resource_name}: {error}"
         raise TransportError(message) from error
-    return VisaTransport(resource, manager)
+    return VisaTransport(resource, manager, gpib=resource_name.upper().startswith("GPIB"))
 
 
 def _release(resource: object, manager: _Manager) -> None:

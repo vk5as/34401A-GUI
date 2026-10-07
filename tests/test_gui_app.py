@@ -5,7 +5,7 @@ import threading
 import time
 import tkinter as tk
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from functools import partial
 from tkinter import ttk
 from typing import cast
@@ -20,7 +20,6 @@ from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, GateTime, Resolution
 from agilent34401a.settings import Settings, Theme
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
-from agilent34401a.transport import Transport
 
 TIMEOUT_S = 10.0
 
@@ -67,48 +66,6 @@ def pump(window: MainWindow, until: Callable[[], bool], timeout: float = TIMEOUT
 def pump_for(window: MainWindow, seconds: float) -> None:
     deadline = time.monotonic() + seconds
     pump(window, lambda: time.monotonic() >= deadline)
-
-
-_TK_START_ATTEMPTS = 3
-
-
-@pytest.fixture(scope="session")
-def tk_root() -> Iterator[tk.Tk]:
-    """One Tk interpreter for the whole run, with each test getting its own Toplevel on it.
-
-    Creating a fresh interpreter per test made Windows CI fail now and then with "Can't find a usable init.tcl".
-    """
-    root = None
-    for attempt in range(_TK_START_ATTEMPTS):
-        try:
-            root = tk.Tk()
-            break
-        except tk.TclError:
-            # CI always has a display (xvfb on Linux), so a missing one there is a failure, not a skip.
-            if attempt == _TK_START_ATTEMPTS - 1:
-                if os.environ.get("CI"):
-                    raise
-                pytest.skip("no display available")
-            time.sleep(0.5)
-    assert root is not None
-    root.withdraw()
-    yield root
-    root.destroy()
-
-
-@pytest.fixture
-def make_window(tk_root):
-    windows: list[MainWindow] = []
-
-    def make(simulator: Simulator | None = None, *, opener: Callable[[], Transport] | None = None) -> MainWindow:
-        meter = simulator if simulator is not None else Simulator()
-        window = MainWindow(tk.Toplevel(tk_root), opener or (lambda: meter), "Simulator")
-        windows.append(window)
-        return window
-
-    yield make
-    for window in windows:
-        window.close()
 
 
 def _exists(widget: tk.Misc) -> bool:
@@ -748,8 +705,9 @@ def test_a_menu_command_runs_when_its_entry_is_invoked(make_window):
     window.add_menu_command("File", "Connect…", lambda: calls.append("connect"))
 
     menu = window.menu("File")
-    assert menu.entrycget(0, "label") == "Connect…"
-    menu.invoke(0)
+    last = menu.index("end")
+    assert menu.entrycget(last, "label") == "Connect…"
+    menu.invoke(last)
     assert calls == ["connect"]
 
 
@@ -771,14 +729,14 @@ def test_entries_added_to_a_menu_keep_their_order(make_window):
     window.add_menu_command("File", "Disconnect", lambda: None)
 
     menu = window.menu("File")
-    assert [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)] == ["Connect…", "Disconnect"]
+    assert [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)][-2:] == ["Connect…", "Disconnect"]
 
 
 def test_the_menubar_is_shown_because_the_view_menu_is_always_there(make_window):
     window = make_window()
 
     assert str(window.root.cget("menu")) == str(window.menubar)
-    assert window.menubar.entrycget(0, "label") == "View"
+    assert "View" in [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
 
 
 def test_an_unusual_menu_name_goes_after_the_usual_ones(make_window):
@@ -788,7 +746,7 @@ def test_an_unusual_menu_name_goes_after_the_usual_ones(make_window):
     window.add_menu_command("Help", "Shortcuts", lambda: None)
 
     labels = [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
-    assert labels == ["View", "Help", "Tools"]
+    assert labels == ["File", "View", "Help", "Tools"]
 
 
 def _style(window: MainWindow) -> ttk.Style:
@@ -1136,6 +1094,7 @@ def _ignore_palette(_window: MainWindow, _palette: object) -> None:
 
 def test_a_closed_window_is_freed_at_once_not_by_the_cycle_collector_in_whichever_thread_runs_it(tk_root):
     """Tk variables must be finalised on the main thread, so a closed window may not sit in a reference cycle."""
+    was_enabled = gc.isenabled()
     gc.disable()
     try:
         window = _window_with(tk_root, Settings.in_memory())
@@ -1146,7 +1105,8 @@ def test_a_closed_window_is_freed_at_once_not_by_the_cycle_collector_in_whicheve
         del window
         assert freed() is None
     finally:
-        gc.enable()
+        if was_enabled:
+            gc.enable()
 
 
 class _Cyclic:
@@ -1183,14 +1143,11 @@ def test_the_window_leaves_the_collector_alone_while_automatic_collection_is_on(
         return 0
 
     monkeypatch.setattr(gc, "collect", collect)
+    # Report the collector as on without really turning it on: the Worker thread must not get a chance to run it
+    # while a window is open (ADR-0008).
+    monkeypatch.setattr(gc, "isenabled", lambda: True)
     window = make_window()
-    was_enabled = gc.isenabled()
-    gc.enable()
-    try:
-        pump_for(window, 0.2)
-    finally:
-        if not was_enabled:
-            gc.disable()
+    pump_for(window, 0.2)
 
     assert collections == []
 

@@ -1,8 +1,15 @@
+import gc
+import os
 import socket
+import time
+import tkinter as tk
+from collections.abc import Callable, Iterator
 
 import pytest
 
-from agilent34401a.sim import TIME_SCALE_ENV_VAR
+from agilent34401a.gui.main_window import MainWindow
+from agilent34401a.sim import TIME_SCALE_ENV_VAR, Simulator
+from agilent34401a.transport import Transport
 
 
 @pytest.fixture(autouse=True)
@@ -26,3 +33,65 @@ def _isolated_config_folder(monkeypatch, tmp_path):
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+
+
+_TK_START_ATTEMPTS = 3
+
+
+@pytest.fixture(autouse=True)
+def _collect_tk_garbage_on_the_main_thread(request):
+    """Keep the cycle collector from freeing a dead window's Tk variables and images on a Worker thread.
+
+    Tk objects cannot be deleted from another thread unless the main loop is running, and these tests drive Tk with
+    `update()`. Whichever thread happened to trigger the collector would run the finalisers and fail whatever test
+    was running with "main thread is not in main loop". So in a test that uses Tk the collector is held off, and the
+    garbage is collected here instead, on the main thread, once the windows are closed.
+    """
+    if "tk_root" not in request.fixturenames:
+        yield
+        return
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.collect()
+        gc.enable()
+
+
+@pytest.fixture(scope="session")
+def tk_root() -> Iterator[tk.Tk]:
+    """One Tk interpreter for the whole run, with each test getting its own Toplevel on it.
+
+    Creating a fresh interpreter per test made Windows CI fail now and then with "Can't find a usable init.tcl".
+    """
+    root = None
+    for attempt in range(_TK_START_ATTEMPTS):
+        try:
+            root = tk.Tk()
+            break
+        except tk.TclError:
+            # CI always has a display (xvfb on Linux), so a missing one there is a failure, not a skip.
+            if attempt == _TK_START_ATTEMPTS - 1:
+                if os.environ.get("CI"):
+                    raise
+                pytest.skip("no display available")
+            time.sleep(0.5)
+    assert root is not None
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
+@pytest.fixture
+def make_window(tk_root):
+    windows: list[MainWindow] = []
+
+    def make(simulator: Simulator | None = None, *, opener: Callable[[], Transport] | None = None) -> MainWindow:
+        meter = simulator if simulator is not None else Simulator()
+        window = MainWindow(tk.Toplevel(tk_root), opener or (lambda: meter), "Simulator")
+        windows.append(window)
+        return window
+
+    yield make
+    for window in windows:
+        window.close()

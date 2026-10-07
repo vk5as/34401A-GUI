@@ -1,8 +1,5 @@
 """The Sense tab: AC Filter, Gate Time, Autozero and Input Impedance controls, and the Terminals indicator."""
 
-# The window fixtures are shared with test_gui_app and used as arguments, which ruff reads as redefinitions.
-# ruff: noqa: F811
-
 import threading
 from tkinter import ttk
 
@@ -11,14 +8,7 @@ import pytest
 from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.meter import Function, Terminals
 from agilent34401a.sim import Simulator
-from tests.test_gui_app import (  # noqa: F401 - make_window and tk_root are fixtures
-    CountingSimulator,
-    choose,
-    make_window,
-    pump,
-    shows_reading,
-    tk_root,
-)
+from tests.test_gui_app import CountingSimulator, choose, pump, shows_reading
 
 NOT_APPLICABLE = "—"
 AC_FUNCTIONS = (Function.AC_VOLTAGE, Function.AC_CURRENT)

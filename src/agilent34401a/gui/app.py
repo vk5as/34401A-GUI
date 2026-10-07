@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from agilent34401a import __version__
 from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.settings import Settings
-from agilent34401a.sim import Simulator
+from agilent34401a.sim import DEMO_SIGNALS, Simulator
 from agilent34401a.transport import Transport
 
 
@@ -35,7 +35,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     collector_was_on = gc.isenabled()
     gc.disable()
     try:
-        window = create_window(Simulator, "Simulator", settings=Settings.load())
+        window = create_window(lambda: Simulator(signals=DEMO_SIGNALS), "Simulator", settings=Settings.load())
         try:
             window.root.mainloop()
         finally:

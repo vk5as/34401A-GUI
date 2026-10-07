@@ -1,4 +1,3 @@
-# ruff: noqa: F811 - the shared GUI fixtures are imported from test_gui_app and used as test arguments
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -8,7 +7,7 @@ from agilent34401a.gui.system_tab import RESET_QUESTION, SELF_TEST_RUNNING, is_c
 from agilent34401a.meter import Function, Setup
 from agilent34401a.settings import Settings
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
-from tests.test_gui_app import make_window, pump, pump_for, tk_root  # noqa: F401 - the shared fixtures
+from tests.test_gui_app import pump, pump_for
 
 TIMEOUT_S = 10.0
 

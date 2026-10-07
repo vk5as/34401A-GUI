@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
+from agilent34401a.gui.chart_tab import install_chart
 from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
 from agilent34401a.gui.system_tab import SystemTab
@@ -104,6 +105,7 @@ class MainWindow:
         self._poll_id: str | None = None
         self._setup: Setup | None = None  # what the Meter last reported it is doing
         self._last: ReadingTaken | None = None  # the Reading on the readout
+        self._reading_listeners: list[Callable[[ReadingTaken], None]] = []
 
         root.title(f"Agilent 34401A {__version__}")
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -196,9 +198,14 @@ class MainWindow:
 
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
+        self.chart = install_chart(self)
         self.sense_tab = SenseTab(self.notebook, self._request)
         self.add_tab("Sense", self.sense_tab.frame)
         self._add_system_tab()
+
+    def add_reading_listener(self, listener: Callable[[ReadingTaken], None]) -> None:
+        """Call `listener` with every Reading as it is taken, on the GUI thread. Keep it cheap."""
+        self._reading_listeners.append(listener)
 
     def _add_system_tab(self) -> None:
         tab = self.system_tab = SystemTab(self.notebook, self._worker)
@@ -458,6 +465,8 @@ class MainWindow:
         match event:
             case ReadingTaken(timestamp=timestamp):
                 self._last = event
+                for listener in self._reading_listeners:
+                    listener(event)
                 self._render_readout()
                 self.status_message.configure(text="")
                 if self._running:

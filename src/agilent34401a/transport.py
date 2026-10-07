@@ -1,6 +1,6 @@
 """The Transport seam: the only way the application talks to a Meter."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 class Transport(Protocol):
@@ -23,3 +23,14 @@ class Transport(Protocol):
 
     def close(self) -> None:
         """Release the channel. Closing twice is harmless."""
+
+
+@runtime_checkable
+class BusLockout(Protocol):
+    """An optional extra for Connections that can send the bus-level local lockout (GPIB).
+
+    RS-232 has no such message, so a Transport without it is locked with `SYST:RWL` instead.
+    """
+
+    def set_local_lockout(self, *, locked: bool) -> bool:
+        """Lock the front panel's Local key (or release that lock); return False if this Connection cannot."""

@@ -1,3 +1,4 @@
+import gc
 import os
 import socket
 import time
@@ -37,6 +38,16 @@ def _isolated_config_folder(monkeypatch, tmp_path):
 _TK_START_ATTEMPTS = 3
 
 
+def collect_tk_garbage() -> None:
+    """Free dead windows' Tk variables and images here, on the main thread.
+
+    Tk objects cannot be deleted from another thread unless the main loop is running. Left alone, the garbage
+    collector runs inside whichever thread (often the Worker's) happens to trigger it, and the test that is
+    running then fails with "main thread is not in main loop".
+    """
+    gc.collect()
+
+
 @pytest.fixture(scope="session")
 def tk_root() -> Iterator[tk.Tk]:
     """One Tk interpreter for the whole run, with each test getting its own Toplevel on it.
@@ -74,3 +85,5 @@ def make_window(tk_root):
     yield make
     for window in windows:
         window.close()
+    windows.clear()
+    collect_tk_garbage()

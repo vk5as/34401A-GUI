@@ -12,6 +12,7 @@ from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.meter import Function, Reading, parse_reading
 from agilent34401a.settings import Settings, XAxis
 from agilent34401a.sim import Simulator
+from tests.conftest import collect_tk_garbage
 from tests.test_gui_app import TIMEOUT_S, pump, pump_for
 
 
@@ -33,6 +34,8 @@ def make_chart(tk_root) -> Iterator[Callable[..., ChartTab]]:
     yield make
     for top in tops:
         top.destroy()
+    tops.clear()
+    collect_tk_garbage()
 
 
 def feed(chart: ChartTab, values: list[float], function: Function = Function.DC_VOLTAGE, start: float = 0.0) -> None:

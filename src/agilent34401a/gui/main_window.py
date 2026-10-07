@@ -12,10 +12,20 @@ from typing import Any, Literal
 from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
 from agilent34401a.gui.chart_tab import install_chart
+from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
 from agilent34401a.gui.system_tab import SystemTab
 from agilent34401a.gui.themes import ERROR_STYLE, Palette, apply_theme, style_menu
-from agilent34401a.meter import NPLC_VALUES, Function, Resolution, Setup, describe_setup, format_range, format_reading
+from agilent34401a.meter import (
+    NPLC_VALUES,
+    Function,
+    Resolution,
+    Setup,
+    Terminals,
+    describe_setup,
+    format_range,
+    format_reading,
+)
 from agilent34401a.rate import ReadingRate
 from agilent34401a.settings import Settings, Theme
 from agilent34401a.transport import Transport
@@ -29,6 +39,7 @@ from agilent34401a.worker import (
     ReadingTaken,
     SetupChanged,
     SetupFailed,
+    TerminalsChanged,
     Worker,
     WorkerFailed,
 )
@@ -183,6 +194,8 @@ class MainWindow:
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
         self.chart = install_chart(self)
+        self.sense_tab = SenseTab(self.notebook, self._request)
+        self.add_tab("Sense", self.sense_tab.frame)
         self._add_system_tab()
 
     def add_reading_listener(self, listener: Callable[[ReadingTaken], None]) -> None:
@@ -340,11 +353,13 @@ class MainWindow:
         status.pack(fill="x", side="bottom")
         self.status_connection = ttk.Label(status, text="Connecting…")
         self.status_identity = ttk.Label(status, text="")
+        self.status_terminals = ttk.Label(status, text="")
         self.status_message = ttk.Label(status, text="")
         self.status_error = ttk.Label(status, text="", style=ERROR_STYLE)
         self.status_rate = ttk.Label(status, text="", anchor="e")
         self.status_connection.pack(side="left", padx=(0, 12))
         self.status_identity.pack(side="left", padx=(0, 12))
+        self.status_terminals.pack(side="left", padx=(0, 12))
         self.status_rate.pack(side="right")
         self.status_error.pack(side="right", padx=(0, 12))
         self.status_message.pack(side="left", fill="x", expand=True)
@@ -452,17 +467,20 @@ class MainWindow:
                     self.status_rate.configure(text="" if rate is None else f"{rate:.1f} Readings/s")
             case ReadingFailed(message):
                 self.status_message.configure(text=f"Reading lost: {message}")
+            case TerminalsChanged(terminals):
+                self._show_terminals(terminals)
             case _:
                 self._handle_connection_event(event)
 
     def _handle_connection_event(self, event: Event) -> None:
         """Handle what changes the Connection or the Setup, as opposed to a Reading."""
         match event:
-            case Connected(identity, setup):
+            case Connected(identity, setup, terminals):
                 self.status_connection.configure(text=f"Connected · {self._resource}")
                 self.status_identity.configure(
                     text=f"{identity.manufacturer} {identity.model} · firmware {identity.firmware}"
                 )
+                self._show_terminals(terminals)
                 self._connected = True
                 self.run_button.configure(state="normal")
                 self._show_setup(setup)
@@ -487,6 +505,9 @@ class MainWindow:
             case Disconnected():
                 if not self._ended:
                     self._end("Disconnected")
+
+    def _show_terminals(self, terminals: Terminals) -> None:
+        self.status_terminals.configure(text=f"Terminals: {terminals.label}")
 
     def _render_readout(self) -> None:
         taken = self._last
@@ -539,6 +560,7 @@ class MainWindow:
             )
         else:
             self._fill(self.nplc_box, [], _NOT_APPLICABLE, applicable=False)
+        self.sense_tab.show(setup, enabled=enabled)
 
     @staticmethod
     def _fill(box: ttk.Combobox, values: list[str], shown: str, *, applicable: bool) -> None:

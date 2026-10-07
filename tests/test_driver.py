@@ -203,7 +203,14 @@ def test_apply_sends_function_then_range_then_integration_time_then_checks_the_e
 
     Driver(transport).apply(Setup.default(Function.DC_VOLTAGE).with_range(10.0).with_nplc(1))
 
-    assert transport.commands == ['FUNC "VOLT:DC"', "VOLT:DC:RANG 10", "VOLT:DC:NPLC 1", "SYST:ERR?"]
+    assert transport.commands == [
+        'FUNC "VOLT:DC"',
+        "VOLT:DC:RANG 10",
+        "VOLT:DC:NPLC 1",
+        "ZERO:AUTO ON",
+        "INP:IMP:AUTO OFF",
+        "SYST:ERR?",
+    ]
 
 
 def test_apply_switches_autorange_on_rather_than_sending_a_range():
@@ -211,7 +218,7 @@ def test_apply_switches_autorange_on_rather_than_sending_a_range():
 
     Driver(transport).apply(Setup.default(Function.AC_CURRENT))
 
-    assert transport.commands == ['FUNC "CURR:AC"', "CURR:AC:RANG:AUTO ON", "SYST:ERR?"]
+    assert transport.commands == ['FUNC "CURR:AC"', "CURR:AC:RANG:AUTO ON", "DET:BAND 20", "SYST:ERR?"]
 
 
 @pytest.mark.parametrize(
@@ -219,10 +226,13 @@ def test_apply_switches_autorange_on_rather_than_sending_a_range():
     [
         (Function.CONTINUITY, ['FUNC "CONT"', "SYST:ERR?"]),
         (Function.DIODE, ['FUNC "DIOD"', "SYST:ERR?"]),
-        (Function.FREQUENCY, ['FUNC "FREQ"', "FREQ:VOLT:RANG:AUTO ON", "SYST:ERR?"]),
-        (Function.PERIOD, ['FUNC "PER"', "PER:VOLT:RANG:AUTO ON", "SYST:ERR?"]),
-        (Function.RESISTANCE_4W, ['FUNC "FRES"', "FRES:RANG:AUTO ON", "FRES:NPLC 10", "SYST:ERR?"]),
-        (Function.DC_VOLTAGE_RATIO, ['FUNC "VOLT:DC:RAT"', "VOLT:DC:RANG:AUTO ON", "VOLT:DC:NPLC 10", "SYST:ERR?"]),
+        (Function.FREQUENCY, ['FUNC "FREQ"', "FREQ:VOLT:RANG:AUTO ON", "FREQ:APER 0.1", "SYST:ERR?"]),
+        (Function.PERIOD, ['FUNC "PER"', "PER:VOLT:RANG:AUTO ON", "PER:APER 0.1", "SYST:ERR?"]),
+        (Function.RESISTANCE_4W, ['FUNC "FRES"', "FRES:RANG:AUTO ON", "FRES:NPLC 10", "ZERO:AUTO ON", "SYST:ERR?"]),
+        (
+            Function.DC_VOLTAGE_RATIO,
+            ['FUNC "VOLT:DC:RAT"', "VOLT:DC:RANG:AUTO ON", "VOLT:DC:NPLC 10", "ZERO:AUTO ON", "SYST:ERR?"],
+        ),
     ],
 )
 def test_apply_only_sends_the_settings_a_function_has(function, commands):
@@ -308,7 +318,7 @@ def test_read_setup_rejects_a_function_it_does_not_know(reply):
 
 @pytest.mark.parametrize("reply", ['"VOLT"', "VOLT", '"volt"', '"VOLT:DC"', ' "VOLT"\r\n'])
 def test_read_setup_understands_the_forms_the_meter_may_name_dc_voltage_in(reply):
-    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01")).read_setup()
+    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01", "1", "0")).read_setup()
 
     assert setup.function is Function.DC_VOLTAGE
 

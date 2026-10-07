@@ -38,14 +38,24 @@ def _isolated_config_folder(monkeypatch, tmp_path):
 _TK_START_ATTEMPTS = 3
 
 
-def collect_tk_garbage() -> None:
-    """Free dead windows' Tk variables and images here, on the main thread.
+@pytest.fixture(autouse=True)
+def _collect_tk_garbage_on_the_main_thread(request):
+    """Keep the cycle collector from freeing a dead window's Tk variables and images on a Worker thread.
 
-    Tk objects cannot be deleted from another thread unless the main loop is running. Left alone, the garbage
-    collector runs inside whichever thread (often the Worker's) happens to trigger it, and the test that is
-    running then fails with "main thread is not in main loop".
+    Tk objects cannot be deleted from another thread unless the main loop is running, and these tests drive Tk with
+    `update()`. Whichever thread happened to trigger the collector would run the finalisers and fail whatever test
+    was running with "main thread is not in main loop". So in a test that uses Tk the collector is held off, and the
+    garbage is collected here instead, on the main thread, once the windows are closed.
     """
-    gc.collect()
+    if "tk_root" not in request.fixturenames:
+        yield
+        return
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.collect()
+        gc.enable()
 
 
 @pytest.fixture(scope="session")
@@ -85,5 +95,3 @@ def make_window(tk_root):
     yield make
     for window in windows:
         window.close()
-    windows.clear()
-    collect_tk_garbage()

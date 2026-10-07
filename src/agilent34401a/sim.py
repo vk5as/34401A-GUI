@@ -313,6 +313,11 @@ class Simulator:
             value = float(f"{signal:.{setup.resolution.significant_digits - 1}e}")
         return _number_reply(value)
 
+    @property
+    def has_reply(self) -> bool:
+        """Whether a reply is waiting to be read, which is how a server knows a line was a query."""
+        return bool(self._replies)
+
     def _reply(self, text: str, duration: float = 0.0) -> None:
         self._replies.append((text, duration))
 

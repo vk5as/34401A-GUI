@@ -1,9 +1,11 @@
 import pytest
 
-from agilent34401a import __version__
+from agilent34401a import __version__, cli
+from agilent34401a.backend import Backend
 from agilent34401a.cli import main
+from agilent34401a.connection import ConnectionSettings
 from agilent34401a.driver import Driver, QueuedError
-from agilent34401a.errors import MeterError, UnrecognisedIdentityError
+from agilent34401a.errors import BackendUnavailableError, MeterError, TransportTimeoutError, UnrecognisedIdentityError
 from agilent34401a.meter import Function, Setup, reading_timeout
 from agilent34401a.sim import Simulator
 
@@ -28,14 +30,6 @@ def test_read_with_simulate_prints_a_dc_voltage_reading_and_succeeds(capsys):
     captured = capsys.readouterr()
     assert captured.out == "1.000000 V\n"
     assert captured.err == ""
-
-
-def test_read_without_simulate_explains_that_connections_are_not_available_yet(capsys):
-    with pytest.raises(SystemExit) as exit_info:
-        main(["read"])
-
-    assert exit_info.value.code == 2
-    assert "--simulate" in capsys.readouterr().err
 
 
 def test_read_reports_a_meter_failure_on_stderr_and_exits_non_zero(monkeypatch, capsys):
@@ -210,3 +204,105 @@ def test_read_switches_function_without_rewriting_the_functions_own_settings(mon
     assert main(["read", "--simulate", "--function", "res"]) == 0
 
     assert [command for command in writes if not command.endswith("?")] == ['FUNC "RES"']
+
+
+def _opened(monkeypatch: pytest.MonkeyPatch) -> list[ConnectionSettings]:
+    """Replace the real Connection opener with one that hands out a Simulator and records the settings."""
+    opened: list[ConnectionSettings] = []
+
+    def open_simulator(settings: ConnectionSettings) -> Simulator:
+        opened.append(settings)
+        return Simulator()
+
+    monkeypatch.setattr(cli, "open_transport", open_simulator)
+    return opened
+
+
+def test_read_without_simulate_opens_gpib_board_0_address_22_through_auto(monkeypatch, capsys):
+    opened = _opened(monkeypatch)
+
+    assert main(["read"]) == 0
+
+    assert opened == [ConnectionSettings(backend=Backend.AUTO, resource=None, gpib_board=0, gpib_address=22)]
+    assert opened[0].resource_name == "GPIB0::22::INSTR"
+    assert capsys.readouterr().out == "1.000000 V\n"
+
+
+@pytest.mark.parametrize(
+    ("option", "backend"), [("auto", Backend.AUTO), ("ivi", Backend.VENDOR), ("py", Backend.PYVISA_PY)]
+)
+def test_read_takes_the_backend_from_the_command_line(monkeypatch, option, backend):
+    opened = _opened(monkeypatch)
+
+    main(["read", "--backend", option])
+
+    assert opened[0].backend is backend
+
+
+def test_read_takes_the_gpib_board_and_address_from_the_command_line(monkeypatch):
+    opened = _opened(monkeypatch)
+
+    main(["read", "--gpib-board", "1", "--gpib-address", "7"])
+
+    assert opened[0].resource_name == "GPIB1::7::INSTR"
+
+
+def test_read_takes_a_raw_resource_string(monkeypatch):
+    opened = _opened(monkeypatch)
+
+    main(["read", "--resource", "TCPIP::10.0.0.5::5025::SOCKET"])
+
+    assert opened[0].resource_name == "TCPIP::10.0.0.5::5025::SOCKET"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--simulate", "--resource", "TCPIP::10.0.0.5::5025::SOCKET"],
+        ["--simulate", "--backend", "py"],
+        ["--simulate", "--gpib-address", "5"],
+        ["--simulate", "--gpib-board", "1"],
+        ["--resource", "TCPIP::10.0.0.5::5025::SOCKET", "--gpib-address", "5"],
+        ["--resource", "TCPIP::10.0.0.5::5025::SOCKET", "--gpib-board", "1"],
+        ["--gpib-address", "31"],
+        ["--gpib-address", "-1"],
+        ["--gpib-board", "-1"],
+        ["--resource", "  "],
+    ],
+)
+def test_read_refuses_contradictory_or_impossible_connection_options(monkeypatch, options, capsys):
+    opened = _opened(monkeypatch)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["read", *options])
+
+    assert exit_info.value.code == 2
+    assert opened == []
+    assert "error" in capsys.readouterr().err
+
+
+def test_read_reports_a_backend_that_cannot_be_used_and_exits_non_zero(monkeypatch, capsys):
+    def unavailable(_settings):
+        message = "Keysight/NI VISA is not available: Could not open VISA library"
+        raise BackendUnavailableError(message)
+
+    monkeypatch.setattr(cli, "open_transport", unavailable)
+
+    assert main(["read", "--backend", "ivi"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Keysight/NI VISA is not available" in captured.err
+
+
+def test_read_reports_a_meter_that_does_not_answer_and_exits_non_zero(monkeypatch, capsys):
+    class Silent(Simulator):
+        def query(self, _command: str) -> str:
+            message = "Timed out waiting for the Meter"
+            raise TransportTimeoutError(message)
+
+    monkeypatch.setattr(cli, "open_transport", lambda _settings: Silent())
+
+    assert main(["read"]) == 1
+
+    assert "Timed out waiting for the Meter" in capsys.readouterr().err

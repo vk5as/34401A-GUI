@@ -23,6 +23,7 @@ def test_version_falls_back_when_package_metadata_is_unavailable(monkeypatch):
     [
         ("agilent34401a-gui", "agilent34401a.gui.app:main"),
         ("agilent34401a-cli", "agilent34401a.cli:main"),
+        ("agilent34401a-sim", "agilent34401a.sim_server:main"),
     ],
 )
 def test_console_script_is_registered(script, target):

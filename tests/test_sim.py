@@ -625,3 +625,27 @@ def test_an_autorange_flag_that_is_neither_on_nor_off_is_an_illegal_parameter_va
 
     assert _errors(simulator) == ['-224,"Illegal parameter value"']
     assert simulator.query("VOLT:DC:RANG:AUTO?") == "1"
+
+
+def _has_reply(simulator: Simulator) -> bool:
+    return simulator.has_reply  # a function, so the type checker does not assume the answer cannot change
+
+
+def test_a_query_leaves_a_reply_waiting_until_it_is_read():
+    simulator = Simulator()
+    assert not _has_reply(simulator)
+
+    simulator.write("*IDN?")
+    assert _has_reply(simulator)
+
+    simulator.read()
+    assert not _has_reply(simulator)
+
+
+@pytest.mark.parametrize("command", ["*CLS", "*RST", 'FUNC "RES"', "BOGUS", "BOGUS?", "VOLT:DC:RANG 10"])
+def test_commands_that_have_no_answer_leave_no_reply_waiting(command):
+    simulator = Simulator()
+
+    simulator.write(command)
+
+    assert not _has_reply(simulator)

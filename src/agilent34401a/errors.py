@@ -13,6 +13,10 @@ class TransportTimeoutError(TransportError):
     """The Meter did not answer within the Transport's timeout."""
 
 
+class BackendUnavailableError(TransportError):
+    """The VISA Backend asked for cannot be used, or no Backend can."""
+
+
 class MalformedReplyError(MeterError):
     """The Meter's reply could not be understood."""
 

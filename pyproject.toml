@@ -64,6 +64,7 @@ Issues = "https://github.com/vk5as/34401A-GUI/issues"
 [project.scripts]
 agilent34401a-gui = "agilent34401a.gui.app:main"
 agilent34401a-cli = "agilent34401a.cli:main"
+agilent34401a-sim = "agilent34401a.sim_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -149,4 +150,5 @@ show_missing = true
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
+    "if __name__ == .__main__.:",
 ]

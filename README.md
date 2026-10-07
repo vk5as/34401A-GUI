@@ -27,6 +27,15 @@ agilent34401a-cli selftest --simulate   # run the self-test (about 10 s on a rea
 agilent34401a-cli reset --simulate      # *RST: the only command that resets the Meter
 ```
 
+`raw` sends one raw SCPI command or query and prints the reply, like the SCPI console tab (Ctrl+K). Commands that
+would change the Meter's calibration (`CAL:SEC`, `CAL:VAL`, `CAL`, `CAL:STR` writes) are refused with exit code 2
+unless you pass `--allow-calibration`; read-only queries such as `CAL:COUN?` need no flag:
+
+```bash
+agilent34401a-cli raw --simulate "*IDN?"
+agilent34401a-cli raw --simulate "VOLT:DC:NPLC 10"        # a command: no reply, exit 1 if the Meter complains
+```
+
 To exercise the real pyvisa stack without a Meter, run the Simulator as a TCP server and point the CLI at it:
 
 ```bash

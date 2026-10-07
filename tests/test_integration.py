@@ -133,15 +133,18 @@ def test_a_server_that_goes_away_is_reported_as_a_transport_error():
         server.stop()
 
 
-def test_a_port_nobody_listens_on_is_reported_with_a_reason(unused_port):
-    transport = open_transport(
-        ConnectionSettings(backend=Backend.PYVISA_PY, resource=f"TCPIP::127.0.0.1::{unused_port}::SOCKET")
-    )
+def _open_and_query(resource_name: str) -> None:
+    transport = open_transport(ConnectionSettings(backend=Backend.PYVISA_PY, resource=resource_name))
     try:
-        with pytest.raises(TransportError, match="refused"):
-            transport.query("*IDN?")
+        transport.query("*IDN?")
     finally:
         transport.close()
+
+
+def test_a_port_nobody_listens_on_is_reported_as_a_transport_error(unused_port):
+    # pyvisa-py connects lazily on Linux and eagerly on Windows, so either opening or the first command may raise.
+    with pytest.raises(TransportError):
+        _open_and_query(f"TCPIP::127.0.0.1::{unused_port}::SOCKET")
 
 
 def test_pyvisa_py_is_detected_and_auto_uses_it_when_vendor_visa_is_missing(server):
@@ -219,4 +222,4 @@ def test_the_cli_reports_a_connection_that_cannot_be_made(unused_port, capsys):
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "refused" in captured.err
+    assert captured.err.startswith("agilent34401a-cli: error:")

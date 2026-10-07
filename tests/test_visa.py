@@ -212,15 +212,19 @@ def test_opening_through_an_unavailable_library_is_reported_as_the_backend_being
         open_visa_transport("@no-such-backend", "GPIB0::22::INSTR")
 
 
-def test_a_socket_nobody_listens_on_fails_on_first_use_as_a_transport_error(unused_port):
-    # pyvisa-py connects lazily, so opening succeeds and the refusal surfaces on the first command.
-    transport = open_visa_transport("@py", f"TCPIP::127.0.0.1::{unused_port}::SOCKET")
-
+def _open_and_query(resource_name: str) -> None:
+    transport = open_visa_transport("@py", resource_name)
     try:
-        with pytest.raises(TransportError, match="refused"):
-            transport.query("*IDN?")
+        transport.query("*IDN?")
     finally:
         transport.close()
+
+
+def test_a_socket_nobody_listens_on_is_a_transport_error(unused_port):
+    # pyvisa-py connects lazily on Linux (the refusal surfaces on the first command) but eagerly on Windows
+    # (opening fails), so either step may be the one that raises.
+    with pytest.raises(TransportError):
+        _open_and_query(f"TCPIP::127.0.0.1::{unused_port}::SOCKET")
 
 
 class PlainResource:

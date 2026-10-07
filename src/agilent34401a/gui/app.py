@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from agilent34401a import __version__
 from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.settings import Settings
-from agilent34401a.sim import Simulator
+from agilent34401a.sim import DEMO_SIGNALS, Simulator
 from agilent34401a.transport import Transport
 
 
@@ -28,7 +28,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.simulate:
         # The connection dialog (Backend, resource, serial parameters) arrives with its own issue.
         parser.error("only the Simulator is available so far; pass --simulate")
-    window = create_window(Simulator, "Simulator", settings=Settings.load())
+    window = create_window(lambda: Simulator(signals=DEMO_SIGNALS), "Simulator", settings=Settings.load())
     try:
         window.root.mainloop()
     finally:

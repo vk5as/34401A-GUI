@@ -11,6 +11,7 @@ from typing import Literal
 
 from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
+from agilent34401a.gui.chart_tab import install_chart
 from agilent34401a.meter import NPLC_VALUES, Function, Resolution, Setup, describe_setup, format_range, format_reading
 from agilent34401a.rate import ReadingRate
 from agilent34401a.settings import Settings
@@ -78,6 +79,7 @@ class MainWindow:
         self._poll_id: str | None = None
         self._setup: Setup | None = None  # what the Meter last reported it is doing
         self._last: ReadingTaken | None = None  # the Reading on the readout
+        self._reading_listeners: list[Callable[[ReadingTaken], None]] = []
 
         root.title(f"Agilent 34401A {__version__}")
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -156,6 +158,11 @@ class MainWindow:
 
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
+        self.chart = install_chart(self)
+
+    def add_reading_listener(self, listener: Callable[[ReadingTaken], None]) -> None:
+        """Call `listener` with every Reading as it is taken, on the GUI thread. Keep it cheap."""
+        self._reading_listeners.append(listener)
 
     def menu(self, name: str) -> tk.Menu:
         """Return the menu called `name`, creating it in its usual place (File, View, Help, then any others)."""
@@ -283,6 +290,8 @@ class MainWindow:
         match event:
             case ReadingTaken(timestamp=timestamp):
                 self._last = event
+                for listener in self._reading_listeners:
+                    listener(event)
                 self._render_readout()
                 self.status_message.configure(text="")
                 if self._running:

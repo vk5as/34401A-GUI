@@ -2,10 +2,12 @@
 
 import math
 import os
+import random
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 
+from agilent34401a.applied_signal import AppliedSignal
 from agilent34401a.errors import TransportError, TransportTimeoutError
 from agilent34401a.meter import NPLC_VALUES, Function, Setup, measurement_time
 
@@ -46,6 +48,16 @@ _DEFAULT_SIGNALS = {
     Function.DIODE: 0.6,
     Function.DC_VOLTAGE_RATIO: 1.0,
 }
+
+DEMO_SIGNALS: Mapping[Function, AppliedSignal] = {
+    Function.DC_VOLTAGE: AppliedSignal(1.0, noise=0.0005, drift=0.0001, sine_amplitude=0.002, sine_frequency_hz=0.2),
+    Function.AC_VOLTAGE: AppliedSignal(1.0, noise=0.001, sine_amplitude=0.005, sine_frequency_hz=0.1),
+    Function.DC_CURRENT: AppliedSignal(0.001, noise=0.000002, sine_amplitude=0.00001, sine_frequency_hz=0.2),
+    Function.RESISTANCE_2W: AppliedSignal(1000.0, noise=0.2, drift=0.01, sine_amplitude=0.5, sine_frequency_hz=0.1),
+    Function.RESISTANCE_4W: AppliedSignal(1000.0, noise=0.05, drift=0.01, sine_amplitude=0.2, sine_frequency_hz=0.1),
+    Function.FREQUENCY: AppliedSignal(1000.0, noise=0.05, sine_amplitude=0.5, sine_frequency_hz=0.05),
+}
+"""Applied Signals that wander like a real bench source, for `--simulate` to show the chart something to draw."""
 
 # SCPI lets a header be written in full or abbreviated; the Simulator understands the long forms it is likely to meet.
 _LONG_FORMS = {
@@ -123,18 +135,23 @@ _DIODE_LIMIT = 1.2
 class Simulator:
     """One simulated Meter, driven through the same text interface as a real one.
 
-    `signals` sets the Applied Signal per Function (`dc_voltage` is a shortcut for DC voltage). `time_scale`
-    stretches (or, at 0, removes) the time a Reading takes; it defaults to the `AGILENT34401A_SIM_TIME_SCALE`
-    environment variable, or real time when that is unset.
+    `signals` sets the Applied Signal per Function: a plain number is a constant value, an `AppliedSignal` adds
+    noise, drift or a sine (`dc_voltage` is a shortcut for DC voltage). Drift and the sine follow the Simulator's
+    own clock (`signal_time`), which moves on by the time each Reading takes whatever the `time_scale`, so a run is
+    repeatable. Noise comes from `random_source`, or from a generator started with `seed`. `time_scale` stretches
+    (or, at 0, removes) the time a Reading takes; it defaults to the `AGILENT34401A_SIM_TIME_SCALE` environment
+    variable, or real time when that is unset.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - every one is an optional keyword that tests and the server pick from
         self,
         *,
         identity: str = HEWLETT_PACKARD_IDENTITY,
         dc_voltage: float | None = None,
-        signals: Mapping[Function, float] | None = None,
+        signals: Mapping[Function, float | AppliedSignal] | None = None,
         time_scale: float | None = None,
+        seed: int | None = None,
+        random_source: random.Random | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if time_scale is None:
@@ -145,15 +162,28 @@ class Simulator:
         self.timeout = 2.0
         self.time_scale = time_scale
         self._identity = identity
-        self._signals = {**_DEFAULT_SIGNALS, **(signals or {})}
+        self._signals = {function: AppliedSignal(value) for function, value in _DEFAULT_SIGNALS.items()}
+        for function, signal in (signals or {}).items():
+            self.set_signal(function, signal)
         if dc_voltage is not None:
-            self._signals[Function.DC_VOLTAGE] = dc_voltage
+            self.set_signal(Function.DC_VOLTAGE, dc_voltage)
+        self._random = random_source if random_source is not None else random.Random(seed)  # nosec B311  # noqa: S311
+        self._signal_time = 0.0
         self._sleep = sleep
         self._closed = False
         self._errors: deque[str] = deque()
         # Each pending reply carries the real-time seconds the Meter needs before it can send it.
         self._replies: deque[tuple[str, float]] = deque()
         self._reset()
+
+    @property
+    def signal_time(self) -> float:
+        """Simulated seconds since the Simulator started, which is what drift and the sine component follow."""
+        return self._signal_time
+
+    def set_signal(self, function: Function, signal: float | AppliedSignal) -> None:
+        """Change the Applied Signal on `function`'s terminals; a plain number is a constant value."""
+        self._signals[function] = signal if isinstance(signal, AppliedSignal) else AppliedSignal(signal)
 
     def _reset(self) -> None:
         self._function = Function.DC_VOLTAGE
@@ -288,9 +318,12 @@ class Simulator:
             setup = setup.with_nplc(self._nplc[group])
         return setup
 
-    def _autorange(self, function: Function) -> float:
-        """Return the lowest range of `function` that holds its Applied Signal, or the highest when none does."""
-        signal = abs(self._signals[function])
+    def _autorange(self, function: Function, signal: float | None = None) -> float:
+        """Return the lowest range of `function` that holds `signal`, or the highest when none does.
+
+        Without a `signal` it uses the largest the Applied Signal reaches without noise or drift.
+        """
+        signal = self._signals[function].peak if signal is None else abs(signal)
         return next(
             (candidate for candidate in function.ranges if signal <= _limit(function, candidate)),
             function.ranges[-1],
@@ -298,9 +331,10 @@ class Simulator:
 
     def _measure(self, setup: Setup) -> str:
         function = setup.function
-        signal = self._signals[function]
+        signal = self._signals[function].at(self._signal_time, self._random)
+        self._signal_time += measurement_time(setup)
         if function in _RANGE_SCALED:
-            range_in_use = setup.range or self._autorange(function)
+            range_in_use = setup.range or self._autorange(function, signal)
             if abs(signal) > _limit(function, range_in_use):
                 return _overload(signal)
             # The last displayed digit is a millionth of the range at 6½ digits, a hundred-thousandth at 5½.

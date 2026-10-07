@@ -18,7 +18,14 @@ from agilent34401a.meter import (
     format_range,
     parse_reading,
 )
-from agilent34401a.transport import Transport
+from agilent34401a.transport import BusLockout, Transport
+
+SELF_TEST_TIMEOUT_S = 30.0
+"""The 34401A's self-test takes about ten seconds, so `*TST?` is given three times that to reply."""
+DISPLAY_TEXT_LIMIT = 12
+"""The most characters the Meter's display shows in a message."""
+_ERROR_QUEUE_STATUS_BIT = 4  # bit 2 of the status byte: the error queue is not empty
+_QUOTED = 2  # a quoted string is at least its two quotes
 
 # Early firmware reports HEWLETT-PACKARD, later firmware Agilent Technologies; both are the same Meter.
 _MANUFACTURERS = frozenset({"hewlett-packard", "agilent technologies"})
@@ -78,6 +85,18 @@ class QueuedError:
 
     code: int
     message: str
+
+
+@dataclass(frozen=True)
+class SystemInfo:
+    """What the System tab shows besides the Meter's identity. The calibration items are read-only (ADR-0006)."""
+
+    scpi_version: str
+    calibration_count: int
+    calibration_message: str
+    beeper_enabled: bool
+    display_on: bool
+    display_text: str
 
 
 class Driver:
@@ -206,6 +225,108 @@ class Driver:
             errors.append(QueuedError(code, match.group(2)))
         return errors
 
+    def read_system(self) -> SystemInfo:
+        """Read the SCPI version, calibration count and message, beeper and display state. Changes nothing."""
+        query = self._transport.query
+        return SystemInfo(
+            scpi_version=query("SYST:VERS?").strip(),
+            calibration_count=int(self._read_number("CAL:COUN?")),
+            calibration_message=_unquote(query("CAL:STR?")),
+            beeper_enabled=self._read_flag("SYST:BEEP:STAT?"),
+            display_on=self._read_flag("DISP?"),
+            display_text=_unquote(query("DISP:TEXT?")),
+        )
+
+    def reset(self) -> list[QueuedError]:
+        """Send `*RST`. This is the only place the application ever resets the Meter (ADR-0004).
+
+        The driver then expects a freshly reset Meter; call `read_setup` to learn what it is in.
+        """
+        self._transport.write("*RST")
+        self._setup = Setup.default(Function.DC_VOLTAGE)
+        return self.drain_errors()
+
+    def self_test(self) -> bool:
+        """Run the Meter's self-test (about ten seconds) and return whether it passed.
+
+        The Transport's timeout is raised for the test and put back afterwards, even when the test fails.
+        """
+        previous = self._transport.timeout
+        self._transport.timeout = max(previous, SELF_TEST_TIMEOUT_S)
+        try:
+            reply = self._transport.query("*TST?")
+        finally:
+            self._transport.timeout = previous
+        result = reply.strip().lstrip("+")
+        if result not in ("0", "1"):
+            message = f"Meter replied {reply!r} to *TST?, which is not 0 or 1"
+            raise MalformedReplyError(message)
+        return result == "0"
+
+    def status_byte(self) -> int:
+        """Read the Meter's status byte."""
+        return int(self._read_number("*STB?"))
+
+    def errors_if_flagged(self) -> list[QueuedError]:
+        """Drain the error queue only if the status byte says it is not empty (ADR-0005), else return nothing."""
+        if self.status_byte() & _ERROR_QUEUE_STATUS_BIT:
+            return self.drain_errors()
+        return []
+
+    def beep(self) -> list[QueuedError]:
+        """Sound the beeper once."""
+        self._transport.write("SYST:BEEP")
+        return self.drain_errors()
+
+    def set_beeper(self, *, enabled: bool) -> list[QueuedError]:
+        """Turn the beeper that sounds on errors and limit hits on or off."""
+        self._transport.write(f"SYST:BEEP:STAT {'ON' if enabled else 'OFF'}")
+        return self.drain_errors()
+
+    def set_display_text(self, text: str | None) -> list[QueuedError]:
+        """Show `text` on the Meter's display, or give the display back to the Meter when `text` is None."""
+        if text is None:
+            self._transport.write("DISP:TEXT:CLE")
+        else:
+            if len(text) > DISPLAY_TEXT_LIMIT:
+                message = f"The display shows at most {DISPLAY_TEXT_LIMIT} characters, got {len(text)}"
+                raise ValueError(message)
+            if not text.isascii() or not text.isprintable():
+                message = "The display can only show printable ASCII characters"
+                raise ValueError(message)
+            self._transport.write(f'DISP:TEXT "{text.replace(chr(34), chr(34) * 2)}"')
+        return self.drain_errors()
+
+    def set_display(self, *, on: bool) -> list[QueuedError]:
+        """Turn the Meter's display on or off; Readings are still taken while it is off."""
+        self._transport.write(f"DISP {'ON' if on else 'OFF'}")
+        return self.drain_errors()
+
+    def lock_front_panel(self) -> list[QueuedError]:
+        """Start a Lockout: Remote with the front panel's Local key disabled."""
+        return self._set_lockout(locked=True)
+
+    def unlock_front_panel(self) -> list[QueuedError]:
+        """End a Lockout, leaving the Meter in Remote with its Local key working again."""
+        return self._set_lockout(locked=False)
+
+    def _set_lockout(self, *, locked: bool) -> list[QueuedError]:
+        transport = self._transport
+        if not (isinstance(transport, BusLockout) and transport.set_local_lockout(locked=locked)):
+            if locked:
+                transport.write("SYST:RWL")
+            else:
+                transport.write("SYST:LOC")
+                transport.write("SYST:REM")
+        return self.drain_errors()
+
+    def _read_flag(self, query: str) -> bool:
+        reply = self._transport.query(query).strip().upper()
+        if reply not in ("0", "1", "ON", "OFF"):
+            message = f"Meter replied {reply!r} to {query}, which is not 0 or 1"
+            raise MalformedReplyError(message)
+        return reply in ("1", "ON")
+
     def _read_range(self, function: Function) -> float | None:
         prefix = _SETTING_PREFIX[function]
         auto = self._transport.query(f"{prefix}:RANG:AUTO?").strip().upper()
@@ -246,15 +367,6 @@ class Driver:
         message = f"Meter reported an AC Filter of {value:g} Hz, which it does not have"
         raise MalformedReplyError(message)
 
-    def _read_flag(self, query: str) -> bool:
-        reply = self._transport.query(query).strip().upper()
-        if reply in ("1", "ON"):
-            return True
-        if reply in ("0", "OFF"):
-            return False
-        message = f"Meter replied {reply!r} to {query}, which is not 0 or 1"
-        raise MalformedReplyError(message)
-
     def _read_number(self, query: str) -> float:
         reply = self._transport.query(query)
         try:
@@ -265,3 +377,11 @@ class Driver:
             message = f"Meter replied {reply!r} to {query}, which is not a number"
             raise MalformedReplyError(message)
         return value
+
+
+def _unquote(reply: str) -> str:
+    """Strip the double quotes the Meter puts around a string reply, and undouble any quote inside it."""
+    text = reply.strip()
+    if len(text) >= _QUOTED and text[0] == text[-1] == '"':
+        text = text[1:-1].replace('""', '"')
+    return text

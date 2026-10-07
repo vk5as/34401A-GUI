@@ -30,9 +30,7 @@ class SenseTab:
         self.gate_time_box = self._row(1, "Gate Time", self._on_gate_time)
         self.autozero_box = self._row(2, "Autozero", self._on_autozero)
         self.input_impedance_box = self._row(3, "Input Impedance", self._on_input_impedance)
-        ttk.Label(self.frame, text=_AUTOZERO_ONCE_HINT, foreground="#555555").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
-        )
+        ttk.Label(self.frame, text=_AUTOZERO_ONCE_HINT).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     def _on_destroy(self, event: "tk.Event[tk.Misc]") -> None:
         if event.widget is self.frame:

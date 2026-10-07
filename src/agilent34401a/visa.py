@@ -1,6 +1,7 @@
 """The typed boundary around pyvisa (ADR-0007): nothing else in the package imports it."""
 
 import contextlib
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Protocol
@@ -93,6 +94,17 @@ class VisaTransport:
         with _visa_errors():
             self._resource.clear()
 
+    def go_to_local(self) -> None:
+        """Address a GPIB Meter to Local (the REN line's go-to-local); other buses have no REN line, so nothing.
+
+        RS-232 returns to Local with a command instead; that arrives with the RS-232 Connection (issue #7).
+        """
+        self._require_open()
+        control_ren = getattr(self._resource, "control_ren", None)
+        if self._gpib and callable(control_ren):
+            with _visa_errors():
+                control_ren(constants.RENLineOperation.address_gtl)
+
     def set_local_lockout(self, *, locked: bool) -> bool:
         """Send the GPIB local lockout message, or release it; False on any other bus, which has no such message.
 
@@ -165,6 +177,24 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
         message = f"Could not open {resource_name}: {error}"
         raise TransportError(message) from error
     return VisaTransport(resource, manager, gpib=resource_name.upper().startswith("GPIB"))
+
+
+def list_resources(library: str) -> list[str]:
+    """Return the names of the resources the VISA implementation `library` can see right now (a Scan)."""
+    try:
+        manager = pyvisa.ResourceManager(library)
+    except Exception as error:
+        message = f"Could not load the VISA library {library}: {error}"
+        raise BackendUnavailableError(message) from error
+    try:
+        with _visa_errors(), warnings.catch_warnings():
+            # pyvisa-py warns that its TCP/IP discovery sees only the default interface unless psutil is installed;
+            # a Meter is reached by GPIB or serial, so that is not worth a warning on every Scan.
+            warnings.simplefilter("ignore", UserWarning)
+            return list(manager.list_resources())
+    finally:
+        with contextlib.suppress(Exception):
+            manager.close()
 
 
 def _release(resource: object, manager: _Manager) -> None:

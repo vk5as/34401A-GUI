@@ -213,6 +213,8 @@ class Simulator:
         self._sleep = sleep
         self.terminals = Terminals.FRONT
         self._closed = False
+        self.remote = False
+        """Whether the Simulator is in Remote: the first command puts it there, `go_to_local` takes it back."""
         self.self_test_passes = True
         self.beeps = 0  # how many times the Meter has been told to beep
         self.beeper_enabled = True  # kept in non-volatile memory on the Meter, so `*RST` leaves it alone
@@ -252,6 +254,7 @@ class Simulator:
 
     def write(self, command: str) -> None:
         self._require_open()
+        self.remote = True
         header, _, argument = command.strip().partition(" ")
         header = header.upper()
         argument = argument.strip()
@@ -579,6 +582,11 @@ class Simulator:
     def clear(self) -> None:
         self._require_open()
         self._replies.clear()
+
+    def go_to_local(self) -> None:
+        self._require_open()
+        self.remote = False
+        self.front_panel_locked = False  # the front panel is in control again, Local key and all
 
     def close(self) -> None:
         self._closed = True

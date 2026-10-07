@@ -26,6 +26,17 @@ class Transport(Protocol):
 
 
 @runtime_checkable
+class LocalControl(Protocol):
+    """A Transport that can hand the Meter's front panel back to the user (Local).
+
+    Optional: a Transport that cannot, such as a plain socket, simply does not have it.
+    """
+
+    def go_to_local(self) -> None:
+        """Return the Meter to Local, leaving its Setup as it is."""
+
+
+@runtime_checkable
 class BusLockout(Protocol):
     """An optional extra for Connections that can send the bus-level local lockout (GPIB).
 

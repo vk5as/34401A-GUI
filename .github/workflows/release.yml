@@ -1,0 +1,251 @@
+name: Release
+
+# Manual only; there is deliberately no push, tag or schedule trigger. Modelled on cpx400dp-gui.
+#
+# This is a pure-Python package, so it builds ONE universal wheel (py3-none-any) plus an sdist. That single wheel
+# is then installed into a clean virtual environment on real Windows, on every supported Python from 3.11 to
+# 3.14, where the GUI is constructed against the Simulator and both command-line tools print --help. Only when
+# every gate has passed is a GitHub Release created, tagged v<version> from pyproject.toml.
+#
+# Run it from the default branch (Actions -> Release -> Run workflow). From any other branch it runs every gate
+# as a dry run and skips the release.
+on:
+  workflow_dispatch: {}
+
+# Least privilege: every job reads only. The two jobs that need more ask for it themselves (release: contents
+# write; publish-pypi: id-token write).
+permissions:
+  contents: read
+
+# Two releases at once could race on the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Resolve the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Read the version from pyproject.toml
+        id: release
+        run: |
+          set -eu
+          echo "version=$(python scripts/release_info.py version)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(python scripts/release_info.py tag)" >> "$GITHUB_OUTPUT"
+      - name: Refuse to continue if the tag already exists
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -eu
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null; then
+            echo "::error::Tag ${TAG} already exists. Bump the version in pyproject.toml first."
+            exit 1
+          fi
+
+  lint:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package with dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Black
+        run: black --check src tests scripts
+      - name: Ruff
+        run: ruff check src tests scripts
+      - name: mypy
+        run: mypy
+      - name: Bandit
+        run: bandit -c pyproject.toml -r src
+      - name: pip-audit
+        run: pip-audit .
+
+  test-linux:
+    name: Tests, Linux, Python 3.13
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Tk and a virtual display
+        run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
+      - name: Install package with dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: pytest
+        run: xvfb-run -a pytest
+      - name: GUI smoke test
+        run: xvfb-run -a python scripts/ci_smoke_test.py
+      - name: Coverage gate (GUI excluded)
+        run: coverage report --omit="*/agilent34401a/gui/*" --fail-under=85
+
+  test-windows:
+    name: Tests, Windows, Python 3.13
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package with dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: pytest
+        run: pytest
+      - name: GUI smoke test
+        run: python scripts/ci_smoke_test.py
+      - name: Coverage gate (GUI excluded)
+        run: coverage report --omit="*/agilent34401a/gui/*" --fail-under=85
+
+  build:
+    name: Build wheel and sdist
+    needs: [preflight, lint, test-linux, test-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine check-wheel-contents
+      - name: Build
+        run: python -m build
+      - name: Check the files are the wheel and sdist of the pyproject version
+        run: python scripts/release_info.py check-dist dist
+      - name: Check metadata
+        run: twine check --strict dist/*
+      - name: Check wheel contents
+        run: check-wheel-contents dist/*.whl
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  verify-windows:
+    name: Verify the wheel on Windows, Python ${{ matrix.python-version }}
+    needs: build
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      # Only scripts/ is checked out, so the source tree cannot be imported by accident: the wheel is the only
+      # copy of the package this job can see.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Install the built wheel into a clean virtual environment
+        shell: bash
+        run: |
+          set -eu
+          python -m venv release-venv
+          release-venv/Scripts/python -m pip install --upgrade pip
+          release-venv/Scripts/python -m pip install dist/*.whl
+      - name: Verify the GUI constructs, shows a Reading and shuts down (from the installed wheel)
+        shell: bash
+        run: release-venv/Scripts/python scripts/ci_smoke_test.py --installed
+      - name: Verify the command-line entry points
+        shell: bash
+        run: |
+          set -eu
+          release-venv/Scripts/agilent34401a-cli --help
+          release-venv/Scripts/agilent34401a-sim --help
+
+  release:
+    name: Create GitHub Release
+    # Every gate, explicitly: a release is only created when all of these succeeded.
+    needs: [preflight, lint, test-linux, test-windows, build, verify-windows]
+    # A run from another branch is a dry run of the gates; releases come from the default branch only.
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Check the tag still does not exist and the files match the version
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -eu
+          test "$(python scripts/release_info.py tag)" = "${TAG}"
+          python scripts/release_info.py check-dist dist
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null; then
+            echo "::error::Tag ${TAG} appeared while the gates were running."
+            exit 1
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -eu
+          gh release create "${TAG}" dist/*.whl dist/*.tar.gz \
+            --target "${GITHUB_SHA}" \
+            --title "${TAG}" \
+            --generate-notes
+
+  # PyPI Trusted Publishing: PREPARED BUT NOT ENABLED. `if: false` keeps this job skipped on every run, and
+  # nothing depends on it, so the release above never waits for it.
+  #
+  # To enable it later (a small change, no secrets involved):
+  #   1. On pypi.org, add a "pending publisher" (or, once the project exists, a trusted publisher) for the
+  #      project "agilent34401a": owner vk5as, repository 34401A-GUI, workflow file release.yml, environment pypi.
+  #   2. On GitHub, create an environment named "pypi" (Settings -> Environments); consider requiring a reviewer.
+  #   3. Change `if: false` below to `if: github.ref_name == github.event.repository.default_branch`.
+  #   4. Add `release` to this job's `needs` if PyPI should only ever follow a successful GitHub Release.
+  #
+  # Authentication is OpenID Connect, so `id-token: write` is requested here and in no other job.
+  publish-pypi:
+    name: Publish to PyPI (disabled)
+    if: false
+    needs: [preflight, lint, test-linux, test-windows, build, verify-windows]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/agilent34401a/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

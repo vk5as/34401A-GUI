@@ -8,7 +8,7 @@ from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.meter import Function
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.worker import Disconnected
-from tests.test_gui_app import connected, make_window, pump, tk_root  # noqa: F401 - the fixtures come with them
+from tests.test_gui_app import connected, make_window, press, pump, tk_root  # noqa: F401 - the fixtures come with them
 
 
 class RecordingSimulator(Simulator):
@@ -256,3 +256,35 @@ def test_the_console_is_disabled_again_when_the_connection_ends(make_window):  #
     window.console.handle_event(Disconnected())
 
     assert str(window.console.entry.cget("state")) == "disabled"
+
+
+def test_ctrl_k_brings_up_the_console_from_anywhere_and_lists_as_available(make_window):  # noqa: F811
+    window = make_window()
+    pump(window, lambda: connected(window))
+    other = ttk.Frame(window.notebook)
+    window.add_tab("Other", other)
+    window.notebook.select(other)
+    elsewhere = window.function_buttons[Function.DC_VOLTAGE]
+
+    press(elsewhere, "Control-Key-k")
+
+    assert str(window.notebook.select()) == str(window.console.frame)
+    assert window.root.focus_get() is window.console.entry
+    window.show_shortcuts()
+    listed = {str(table_row[0]): table_row[1:] for table_row in _rows(window)}
+    assert listed["Ctrl+K"] == ("Open the SCPI console", "")
+
+
+def test_ctrl_k_in_the_console_entry_does_not_eat_the_command_being_typed(make_window):  # noqa: F811
+    window = make_window()
+    pump(window, lambda: connected(window))
+    window.console.entry.insert(0, "*IDN?")
+
+    press(window.console.entry, "Control-Key-k")
+
+    assert window.console.entry.get() == "*IDN?"
+
+
+def _rows(window: MainWindow) -> list[tuple[str, ...]]:
+    table = window.shortcuts_table
+    return [tuple(str(value) for value in table.item(row, "values")) for row in table.get_children()]

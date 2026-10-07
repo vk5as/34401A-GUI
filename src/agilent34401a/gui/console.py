@@ -68,6 +68,9 @@ class ConsoleTab:
 
         for sequence in ("<Return>", "<KP_Enter>"):
             self.entry.bind(sequence, self._on_enter)
+        # Tk's Ctrl+K in an entry deletes to the end of the line; here it means "go to the console", where we are.
+        self.entry.bind("<Control-k>", lambda _event: "break")
+        self.entry.bind("<Control-K>", lambda _event: "break")
         self.entry.bind("<Up>", self._on_up)
         self.entry.bind("<Down>", self._on_down)
 

@@ -14,6 +14,7 @@ import pytest
 
 from agilent34401a import __version__
 from agilent34401a.errors import TransportError
+from agilent34401a.gui import main_window as main_window_module
 from agilent34401a.gui.app import main
 from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, GateTime, Resolution
@@ -1146,3 +1147,76 @@ def test_a_closed_window_is_freed_at_once_not_by_the_cycle_collector_in_whicheve
         assert freed() is None
     finally:
         gc.enable()
+
+
+class _Cyclic:
+    """Garbage that only the cyclic collector can free."""
+
+    def __init__(self) -> None:
+        self.me = self
+
+
+def test_the_window_collects_cyclic_garbage_itself_when_automatic_collection_is_off(make_window, monkeypatch):
+    # With automatic collection on, the cyclic collector can run on the Worker thread and finalise Tk objects
+    # there, which aborts the process. The application turns it off and the window collects on the Tk thread.
+    monkeypatch.setattr(main_window_module, "_GC_EVERY_TICKS", 1)
+    window = make_window()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        garbage = _Cyclic()
+        reference = weakref.ref(garbage)
+        del garbage
+
+        pump(window, lambda: reference() is None)
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def test_the_window_leaves_the_collector_alone_while_automatic_collection_is_on(make_window, monkeypatch):
+    monkeypatch.setattr(main_window_module, "_GC_EVERY_TICKS", 1)
+    collections: list[bool] = []
+
+    def collect(*_args: object) -> int:
+        collections.append(True)
+        return 0
+
+    monkeypatch.setattr(gc, "collect", collect)
+    window = make_window()
+    was_enabled = gc.isenabled()
+    gc.enable()
+    try:
+        pump_for(window, 0.2)
+    finally:
+        if not was_enabled:
+            gc.disable()
+
+    assert collections == []
+
+
+def test_running_the_app_turns_automatic_collection_off_for_the_life_of_the_window_only(monkeypatch):
+    seen = []
+
+    def run_and_note(self, _n=0):
+        seen.append(gc.isenabled())
+        self.destroy()
+
+    try:
+        tk.Tk().destroy()
+    except tk.TclError:
+        if os.environ.get("CI"):
+            raise
+        pytest.skip("no display available")
+    monkeypatch.setattr(tk.Tk, "mainloop", run_and_note)
+    was_enabled = gc.isenabled()
+    gc.enable()
+    try:
+        assert main(["--simulate"]) == 0
+        after = gc.isenabled()
+    finally:
+        if not was_enabled:
+            gc.disable()
+
+    assert seen == [False]
+    assert after is True

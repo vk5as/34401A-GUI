@@ -1,6 +1,7 @@
 """GUI entry point (`agilent34401a-gui`)."""
 
 import argparse
+import gc
 import tkinter as tk
 from collections.abc import Callable, Sequence
 
@@ -28,9 +29,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.simulate:
         # The connection dialog (Backend, resource, serial parameters) arrives with its own issue.
         parser.error("only the Simulator is available so far; pass --simulate")
-    window = create_window(Simulator, "Simulator", settings=Settings.load())
+    # Python's cyclic garbage collector runs on whichever thread happens to allocate, and finalising a Tk object
+    # on the Worker thread aborts the process. So it is off while the window lives and the window collects on the
+    # Tk thread instead (ADR-0008).
+    collector_was_on = gc.isenabled()
+    gc.disable()
     try:
-        window.root.mainloop()
+        window = create_window(Simulator, "Simulator", settings=Settings.load())
+        try:
+            window.root.mainloop()
+        finally:
+            window.stop()
     finally:
-        window.stop()
+        if collector_was_on:
+            gc.enable()
     return 0

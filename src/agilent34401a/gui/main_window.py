@@ -1,5 +1,6 @@
 """The main window: Function, Range and Resolution controls, a VFD-style readout and a status bar, driven by the Worker."""
 
+import gc
 import logging
 import queue
 import tkinter as tk
@@ -46,6 +47,9 @@ from agilent34401a.worker import (
 _LOG = logging.getLogger(__name__)
 
 _POLL_MS = 50
+# When automatic garbage collection is off (the application turns it off, see gui/app.py) the window collects
+# cyclic garbage itself, here on the Tk thread, every this many polls.
+_GC_EVERY_TICKS = 100
 _MAX_EVENTS_PER_TICK = 200
 NO_READING = "--------"
 _AUTO_RANGE = "Auto"
@@ -106,6 +110,7 @@ class MainWindow:
         self._build()
 
         self._worker.start()
+        self._ticks = 0
         self._poll_id = root.after(_POLL_MS, self._drain)
 
     def _build(self) -> None:
@@ -439,6 +444,9 @@ class MainWindow:
             except queue.Empty:
                 break
             self._handle(event)
+        self._ticks += 1
+        if self._ticks % _GC_EVERY_TICKS == 0 and not gc.isenabled():
+            gc.collect()
         self._poll_id = self.root.after(_POLL_MS, self._drain)
 
     def _handle(self, event: Event) -> None:

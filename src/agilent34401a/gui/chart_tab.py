@@ -165,7 +165,7 @@ class ChartTab(ttk.Frame):
     def break_marker_colours(self) -> list[str]:
         """Return the colour of each Break Marker line as last drawn, as #rrggbb."""
         return [
-            to_hex(colour)
+            to_hex(colour)  # type: ignore[arg-type]
             for artist in self._marker_artists
             if isinstance(artist, LineCollection)
             for colour in artist.get_colors()

@@ -31,6 +31,15 @@ _UNDEFINED_HEADER = '-113,"Undefined header"'
 _MISSING_PARAMETER = '-109,"Missing parameter"'
 _ILLEGAL_PARAMETER = '-224,"Illegal parameter value"'
 _DATA_OUT_OF_RANGE = '-222,"Data out of range"'
+_COMMAND_PROTECTED = '-203,"Command protected"'
+_SELF_TEST_FAILED = '-330,"Self-test failed"'
+
+SCPI_VERSION = "1994.0"
+SELF_TEST_DURATION_S = 10.0
+"""How long `*TST?` takes on a real Meter."""
+_ERROR_QUEUE_STATUS_BIT = 4  # bit 2 of the status byte: the error queue is not empty
+_DISPLAY_TEXT_LIMIT = 12
+_QUOTED = 2  # a quoted string is at least its two quotes
 
 # The Applied Signal on each Function's terminals until a test chooses another.
 _DEFAULT_SIGNALS = {
@@ -64,6 +73,17 @@ _LONG_FORMS = {
     "RANGE": "RANG",
     "NPLCYCLES": "NPLC",
     "RATIO": "RAT",
+    "VERSION": "VERS",
+    "BEEPER": "BEEP",
+    "STATE": "STAT",
+    "DISPLAY": "DISP",
+    "CLEAR": "CLE",
+    "CALIBRATION": "CAL",
+    "COUNT": "COUN",
+    "STRING": "STR",
+    "RWLOCK": "RWL",
+    "LOCAL": "LOC",
+    "REMOTE": "REM",
 }
 
 # What `FUNC?` answers for each Function.
@@ -128,7 +148,7 @@ class Simulator:
     environment variable, or real time when that is unset.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - every option is keyword-only and optional
         self,
         *,
         identity: str = HEWLETT_PACKARD_IDENTITY,
@@ -136,6 +156,8 @@ class Simulator:
         signals: Mapping[Function, float] | None = None,
         time_scale: float | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        calibration_count: int = 1,
+        calibration_message: str = "",
     ) -> None:
         if time_scale is None:
             time_scale = float(os.environ.get(TIME_SCALE_ENV_VAR, "1"))
@@ -150,6 +172,12 @@ class Simulator:
             self._signals[Function.DC_VOLTAGE] = dc_voltage
         self._sleep = sleep
         self._closed = False
+        self.self_test_passes = True
+        self.beeps = 0  # how many times the Meter has been told to beep
+        self.beeper_enabled = True  # kept in non-volatile memory on the Meter, so `*RST` leaves it alone
+        self.calibration_count = calibration_count
+        self.calibration_message = calibration_message
+        self.front_panel_locked = False
         self._errors: deque[str] = deque()
         # Each pending reply carries the real-time seconds the Meter needs before it can send it.
         self._replies: deque[tuple[str, float]] = deque()
@@ -157,6 +185,8 @@ class Simulator:
 
     def _reset(self) -> None:
         self._function = Function.DC_VOLTAGE
+        self.display_on = True
+        self.display_text = ""
         self._ranges: dict[Function, float | None] = dict.fromkeys(_SETTING_GROUPS.values())
         self._nplc: dict[Function, float] = {
             group: Setup.default(group).nplc or 0 for group in _SETTING_GROUPS.values() if group.has_integration_time
@@ -180,6 +210,8 @@ class Simulator:
             self._reply(self._measure(setup), measurement_time(setup))
         elif key == "FUNC":
             self._function_command(query=query, argument=argument)
+        elif self._system_command(key, query=query, argument=argument):
+            pass
         elif not self._setting_command(path, query=query, argument=argument):
             self._errors.append(_UNDEFINED_HEADER)
 
@@ -191,8 +223,63 @@ class Simulator:
                 self._errors.clear()
             case "*RST":
                 self._reset()
+            case "*STB?":
+                self._reply(str(_ERROR_QUEUE_STATUS_BIT if self._errors else 0))
+            case "*TST?":
+                passed = self.self_test_passes
+                if not passed:
+                    self._errors.append(_SELF_TEST_FAILED)
+                self._reply("+0" if passed else "+1", SELF_TEST_DURATION_S)
             case _:
                 self._errors.append(_UNDEFINED_HEADER)
+
+    def _system_command(self, key: str, *, query: bool, argument: str) -> bool:
+        """Handle the beeper, display, version, front panel and calibration commands; False when `key` is not one."""
+        if key.startswith("CAL"):
+            # Only the count and the message can be read: the Simulator, like the application, never calibrates.
+            replies = {"CAL:COUN": f"{self.calibration_count:+d}", "CAL:STR": f'"{self.calibration_message}"'}
+            if query and key in replies:
+                self._reply(replies[key])
+            else:
+                self._errors.append(_COMMAND_PROTECTED)
+            return True
+        handlers: dict[str, Callable[[], None]] = {
+            "SYST:VERS": lambda: self._reply(SCPI_VERSION),
+            "SYST:BEEP": self._beep,
+            "SYST:BEEP:STAT": lambda: self._switch_command("beeper_enabled", query=query, argument=argument),
+            "SYST:RWL": lambda: setattr(self, "front_panel_locked", True),
+            "SYST:LOC": lambda: setattr(self, "front_panel_locked", False),
+            "SYST:REM": lambda: None,
+            "DISP": lambda: self._switch_command("display_on", query=query, argument=argument),
+            "DISP:TEXT": lambda: self._display_text_command(query=query, argument=argument),
+            "DISP:TEXT:CLE": lambda: setattr(self, "display_text", ""),
+        }
+        handler = handlers.get(key)
+        if handler is None:
+            return False
+        handler()
+        return True
+
+    def _beep(self) -> None:
+        self.beeps += 1
+
+    def _switch_command(self, attribute: str, *, query: bool, argument: str) -> None:
+        if query:
+            self._reply("1" if getattr(self, attribute) else "0")
+        elif argument.upper() in ("ON", "1"):
+            setattr(self, attribute, True)
+        elif argument.upper() in ("OFF", "0"):
+            setattr(self, attribute, False)
+        else:
+            self._errors.append(_ILLEGAL_PARAMETER)
+
+    def _display_text_command(self, *, query: bool, argument: str) -> None:
+        if query:
+            self._reply('"' + self.display_text.replace('"', '""') + '"')
+        elif len(argument) >= _QUOTED and argument[0] == argument[-1] == '"':
+            self.display_text = argument[1:-1].replace('""', '"')[:_DISPLAY_TEXT_LIMIT]
+        else:
+            self._errors.append(_ILLEGAL_PARAMETER)
 
     def _function_command(self, *, query: bool, argument: str) -> None:
         if query:

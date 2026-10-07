@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 
-from agilent34401a.driver import Driver, Identity, QueuedError
+from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
 from agilent34401a.errors import MalformedReplyError, MeterError, TransportTimeoutError
 from agilent34401a.meter import Function, Reading, Setup, reading_timeout
 from agilent34401a.transport import Transport
@@ -26,6 +26,7 @@ _LOG = logging.getLogger(__name__)
 _MAX_PENDING_EVENTS = 100
 _BACKOFF_S = 0.01
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
+DEFAULT_ERROR_CHECK_INTERVAL_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,39 @@ class ErrorsReported:
 
 
 @dataclass(frozen=True)
+class SystemRead:
+    """The Meter's system information, read after a request for it or after a change to the beeper or display."""
+
+    info: SystemInfo
+
+
+@dataclass(frozen=True)
+class ResetDone:
+    """The Meter was reset on request (`*RST`). A `SetupChanged` with the Setup it is now in comes first."""
+
+
+@dataclass(frozen=True)
+class SelfTestFinished:
+    """The Meter's self-test ran to the end; `passed` says how it went. Any errors it queued follow."""
+
+    passed: bool
+
+
+@dataclass(frozen=True)
+class LockoutChanged:
+    """The front panel's Local key was disabled (Lockout) or enabled again."""
+
+    locked: bool
+
+
+@dataclass(frozen=True)
+class AdminFailed:
+    """A System request (or the periodic error check) could not be completed; the Connection was resynchronised."""
+
+    message: str
+
+
+@dataclass(frozen=True)
 class SetupFailed:
     """A Setup change could not be completed or confirmed; the Connection was resynchronised."""
 
@@ -98,6 +132,11 @@ Event = (
     | ReadingTaken
     | SetupChanged
     | ErrorsReported
+    | SystemRead
+    | ResetDone
+    | SelfTestFinished
+    | LockoutChanged
+    | AdminFailed
     | SetupFailed
     | ReadingFailed
     | WorkerFailed
@@ -130,15 +169,40 @@ class _Select:
     function: Function
 
 
-_Request = _Run | _Pause | _Shutdown | _Apply | _Select
+@dataclass(frozen=True)
+class _System:
+    """A request about the Meter itself rather than its Setup; `what` names it in a failure message."""
+
+    what: str
+    act: Callable[[Driver], list[Event]]  # talks to the Meter and returns the events to report first
+    refresh: bool = False  # read the system information again afterwards
+    setup_follows: bool = False  # the Meter may now be in another Setup, so read it back
+    then: Event | None = None  # reported last, once everything above has worked
+
+
+_Request = _Run | _Pause | _Shutdown | _Apply | _Select | _System
 
 
 class Worker:
-    """Owns one Connection on its own thread and reports through `events`."""
+    """Owns one Connection on its own thread and reports through `events`.
 
-    def __init__(self, open_transport: Callable[[], Transport], events: "queue.Queue[Event]") -> None:
+    While Continuous runs, the Worker looks at the Meter's status byte every `error_check_interval_s` seconds and
+    drains the error queue only if it says there is something in it (ADR-0005). `clock` is replaceable for tests.
+    """
+
+    def __init__(
+        self,
+        open_transport: Callable[[], Transport],
+        events: "queue.Queue[Event]",
+        *,
+        error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._open_transport = open_transport
         self._events = events
+        self.error_check_interval_s = error_check_interval_s
+        self._clock = clock
+        self._next_error_check = 0.0
         self._requests: queue.Queue[_Request] = queue.Queue()
         self._thread = threading.Thread(target=self._main, name="agilent34401a-worker", daemon=True)
 
@@ -161,6 +225,48 @@ class Worker:
     def select_function(self, function: Function) -> None:
         """Switch the Meter to `function`, keeping that Function's own Range and Integration Time."""
         self._requests.put(_Select(function))
+
+    def read_system(self) -> None:
+        """Read the SCPI version, calibration, beeper and display state; the answer is a `SystemRead`."""
+        self._requests.put(_System("Reading the system information", lambda _driver: [], refresh=True))
+
+    def reset_meter(self) -> None:
+        """Send `*RST` (ADR-0004: only on the user's request), then report the Setup the Meter is in."""
+        self._requests.put(_System("Reset", self._reset, setup_follows=True, then=ResetDone()))
+
+    def run_self_test(self) -> None:
+        """Run the Meter's self-test, which takes about ten seconds; the Worker serves nothing else meanwhile."""
+        self._requests.put(_System("Self-test", self._self_test, setup_follows=True))
+
+    def check_errors(self) -> None:
+        """Drain the Meter's error queue now, whatever its status byte says."""
+        self._requests.put(_System("Checking for errors", lambda driver: _report(driver.drain_errors())))
+
+    def beep(self) -> None:
+        """Sound the Meter's beeper once."""
+        self._requests.put(_System("Beep", lambda driver: _report(driver.beep()), refresh=True))
+
+    def set_beeper(self, *, enabled: bool) -> None:
+        """Turn the beeper that sounds on errors on or off."""
+        self._requests.put(
+            _System("Setting the beeper", lambda driver: _report(driver.set_beeper(enabled=enabled)), refresh=True)
+        )
+
+    def show_display_text(self, text: str | None) -> None:
+        """Show a message on the Meter's display, or hand the display back with None."""
+        self._requests.put(
+            _System("Showing the message", lambda driver: _report(driver.set_display_text(text)), refresh=True)
+        )
+
+    def set_display(self, *, on: bool) -> None:
+        """Turn the Meter's display on or off."""
+        self._requests.put(
+            _System("Switching the display", lambda driver: _report(driver.set_display(on=on)), refresh=True)
+        )
+
+    def set_lockout(self, *, locked: bool) -> None:
+        """Disable (Lockout) or enable the front panel's Local key."""
+        self._requests.put(_System("Front panel lockout", partial(self._lockout, locked=locked)))
 
     def is_alive(self) -> bool:
         """Whether the Worker's thread is still running."""
@@ -206,9 +312,13 @@ class Worker:
                 case _Shutdown():
                     return
                 case _Run():
+                    if not running:
+                        self._next_error_check = self._clock() + self.error_check_interval_s
                     running = True
                 case _Pause():
                     running = False
+                case _System():
+                    self._administer(driver, transport, request)
                 case _Apply(setup):
                     self._change_setup(driver, transport, partial(driver.apply, setup))
                 case _Select(function):
@@ -216,6 +326,7 @@ class Worker:
             if not running or (congested and request is None):
                 continue  # paused, or waiting for the consumer to catch up
             self._take_reading(driver, transport)
+            self._check_errors_if_due(driver, transport)
 
     def _next_request(self, *, running: bool, congested: bool) -> _Request | None:
         if not running:
@@ -250,3 +361,59 @@ class Worker:
         if errors:
             _LOG.warning("The Meter queued errors after a Setup change: %s", errors)
             self._events.put(ErrorsReported(tuple(errors)))
+
+    def _check_errors_if_due(self, driver: Driver, transport: Transport) -> None:
+        """While Readings are being taken, look at the status byte every interval and drain only if it is set."""
+        now = self._clock()
+        if now < self._next_error_check:
+            return
+        self._next_error_check = now + self.error_check_interval_s
+        try:
+            errors = driver.errors_if_flagged()
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            _LOG.warning("Could not check the Meter for errors, resynchronising the Connection: %s", error)
+            self._events.put(AdminFailed(f"Checking for errors failed: {error}"))
+            transport.clear()
+            return
+        if errors:
+            _LOG.warning("The Meter queued errors: %s", errors)
+            self._events.put(ErrorsReported(tuple(errors)))
+
+    def _administer(self, driver: Driver, transport: Transport, request: _System) -> None:
+        """Do one System request and report what came of it; a failure resynchronises the Connection."""
+        try:
+            events = request.act(driver)
+            if request.setup_follows:
+                actual = driver.read_setup()
+                transport.timeout = reading_timeout(actual)
+                events.append(SetupChanged(actual))
+            if request.then is not None:
+                events.append(request.then)
+            if request.refresh:
+                events.append(SystemRead(driver.read_system()))
+        except (MalformedReplyError, TransportTimeoutError, ValueError) as error:
+            _LOG.warning("%s failed, resynchronising the Connection: %s", request.what, error)
+            self._events.put(AdminFailed(f"{request.what} failed: {error}"))
+            transport.clear()
+            return
+        for event in events:
+            self._events.put(event)
+
+    @staticmethod
+    def _reset(driver: Driver) -> list[Event]:
+        return _report(driver.reset())
+
+    @staticmethod
+    def _self_test(driver: Driver) -> list[Event]:
+        passed = driver.self_test()
+        return [SelfTestFinished(passed=passed), *_report(driver.drain_errors())]
+
+    @staticmethod
+    def _lockout(driver: Driver, *, locked: bool) -> list[Event]:
+        errors = driver.lock_front_panel() if locked else driver.unlock_front_panel()
+        return [*_report(errors), LockoutChanged(locked=locked)]
+
+
+def _report(errors: list[QueuedError]) -> list[Event]:
+    """Turn what the Meter's error queue held into the events to report: none when it held nothing."""
+    return [ErrorsReported(tuple(errors))] if errors else []

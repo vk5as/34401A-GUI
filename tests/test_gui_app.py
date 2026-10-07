@@ -936,13 +936,13 @@ def test_keys_still_work_while_a_read_only_combobox_has_focus(make_window):
 def test_ctrl_shortcuts_work_even_in_a_text_field(make_window):
     window = make_window()
     calls = []
-    window.register_shortcut("Ctrl+L", "Test", lambda: calls.append("l"))
+    window.register_shortcut("Ctrl+J", "Test", lambda: calls.append("j"))
     field = tk.Text(window.root)
     field.pack()
 
-    press(field, "Control-Key-l")
+    press(field, "Control-Key-j")
 
-    assert calls == ["l"]
+    assert calls == ["j"]
 
 
 def test_space_does_not_fire_a_shortcut_on_top_of_a_focused_button_pressing_itself(make_window):
@@ -961,10 +961,10 @@ def test_a_feature_registers_a_shortcut_and_it_runs_its_handler(make_window):
     window = make_window()
     calls = []
 
-    window.register_shortcut("Ctrl+L", "Record", lambda: calls.append("record"))
-    press(window.root, "Control-Key-l")
+    window.register_shortcut("Ctrl+J", "Jump", lambda: calls.append("jump"))
+    press(window.root, "Control-Key-j")
 
-    assert calls == ["record"]
+    assert calls == ["jump"]
 
 
 def test_a_shortcut_cannot_be_taken_twice(make_window):
@@ -989,17 +989,19 @@ def test_help_shortcuts_lists_every_shortcut_marking_the_planned_ones(make_windo
     assert [f"F{number}" for number in range(1, 12)] == [key for key in listed if key.startswith("F")]
     assert listed["F2"][0] == "Select AC V"
     assert listed["R"][1] == ""
-    for planned in ("Space", "Ctrl+L", "Ctrl+,"):
+    assert listed["Ctrl+L"] == ("Start or stop recording", "")
+    for planned in ("Space", "Ctrl+,"):
         assert "planned" in listed[planned][1]
 
 
 def test_a_planned_shortcut_is_listed_as_available_once_a_feature_registers_it(make_window):
     window = make_window()
-    window.register_shortcut("Ctrl+L", "Start or stop recording", lambda: None)
+    window.shortcuts.plan("Ctrl+J", "Jump somewhere")
+    window.register_shortcut("Ctrl+J", "Jump somewhere", lambda: None)
 
     window.show_shortcuts()
 
-    assert _listed(window)["Ctrl+L"] == ("Start or stop recording", "")
+    assert _listed(window)["Ctrl+J"] == ("Jump somewhere", "")
     assert "planned" in _listed(window)["Ctrl+,"][1]
 
 
@@ -1098,7 +1100,7 @@ def test_a_closed_window_is_freed_at_once_not_by_the_cycle_collector_in_whicheve
     gc.disable()
     try:
         window = _window_with(tk_root, Settings.in_memory())
-        window.register_shortcut("Ctrl+L", "Record", window.close)  # a handler that is a method of the window
+        window.register_shortcut("Ctrl+J", "Jump", window.close)  # a handler that is a method of the window
         window.on_theme_changed(partial(_ignore_palette, window))
         window.close()
         freed = weakref.ref(window)

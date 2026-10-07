@@ -13,6 +13,7 @@ from agilent34401a import __version__
 from agilent34401a.errors import InvalidSetupError
 from agilent34401a.meter import NPLC_VALUES, Function, Resolution, Setup, describe_setup, format_range, format_reading
 from agilent34401a.rate import ReadingRate
+from agilent34401a.settings import Settings
 from agilent34401a.transport import Transport
 from agilent34401a.worker import (
     Connected,
@@ -54,8 +55,16 @@ def _vfd_label(parent: tk.Frame, text: str, font: tkfont.Font, *, anchor: Litera
 class MainWindow:
     """Shows Continuous Readings from one Meter. All Meter traffic goes through its Worker thread (ADR-0002)."""
 
-    def __init__(self, root: tk.Tk | tk.Toplevel, open_transport: Callable[[], Transport], resource: str) -> None:
+    def __init__(
+        self,
+        root: tk.Tk | tk.Toplevel,
+        open_transport: Callable[[], Transport],
+        resource: str,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
         self.root = root
+        self.settings = settings if settings is not None else Settings.in_memory()
         self._resource = resource
         self._events: queue.Queue[Event] = queue.Queue()
         self._worker = Worker(open_transport, self._events)

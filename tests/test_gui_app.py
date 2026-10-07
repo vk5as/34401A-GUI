@@ -13,6 +13,7 @@ from agilent34401a.errors import TransportError
 from agilent34401a.gui.app import main
 from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, Resolution
+from agilent34401a.settings import Settings, Theme
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.transport import Transport
 
@@ -698,3 +699,19 @@ def test_added_tabs_appear_in_order_under_their_titles(make_window):
 
     assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()] == ["Trigger", "Math"]
     assert window.notebook.winfo_manager() == "pack"
+
+
+def test_the_window_keeps_the_settings_it_was_given(tk_root):
+    settings = Settings.in_memory()
+    window = MainWindow(tk.Toplevel(tk_root), Simulator, "Simulator", settings=settings)
+    try:
+        assert window.settings is settings
+    finally:
+        window.close()
+
+
+def test_a_window_without_settings_gets_defaults_that_are_never_saved(make_window):
+    window = make_window()
+
+    assert window.settings.path is None
+    assert window.settings.theme is Theme.SYSTEM

@@ -1,10 +1,14 @@
+import gc
 import os
 import re
 import threading
 import time
 import tkinter as tk
+import weakref
 from collections.abc import Callable
+from functools import partial
 from tkinter import ttk
+from typing import cast
 
 import pytest
 
@@ -641,11 +645,11 @@ def test_version_flag_prints_the_version_and_exits_successfully(capsys):
     assert __version__ in capsys.readouterr().out
 
 
-def test_the_window_has_no_tab_strip_until_a_tab_is_added(make_window):
+def test_the_window_starts_with_the_chart_as_its_only_tab(make_window):
     window = make_window()
 
-    assert window.notebook.tabs() == ()
-    assert window.notebook.winfo_manager() == ""
+    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()] == ["Chart"]
+    assert window.notebook.winfo_manager() == "pack"
 
 
 def test_added_tabs_appear_in_order_under_their_titles(make_window):
@@ -654,7 +658,7 @@ def test_added_tabs_appear_in_order_under_their_titles(make_window):
     window.add_tab("Trigger", ttk.Frame(window.notebook))
     window.add_tab("Math", ttk.Frame(window.notebook))
 
-    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()] == ["Trigger", "Math"]
+    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()] == ["Chart", "Trigger", "Math"]
     assert window.notebook.winfo_manager() == "pack"
 
 
@@ -681,8 +685,9 @@ def test_a_menu_command_runs_when_its_entry_is_invoked(make_window):
     window.add_menu_command("File", "Connect…", lambda: calls.append("connect"))
 
     menu = window.menu("File")
-    assert menu.entrycget(0, "label") == "Connect…"
-    menu.invoke(0)
+    last = menu.index("end")
+    assert menu.entrycget(last, "label") == "Connect…"
+    menu.invoke(last)
     assert calls == ["connect"]
 
 
@@ -704,21 +709,14 @@ def test_entries_added_to_a_menu_keep_their_order(make_window):
     window.add_menu_command("File", "Disconnect", lambda: None)
 
     menu = window.menu("File")
-    assert [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)] == ["Connect…", "Disconnect"]
+    assert [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)][-2:] == ["Connect…", "Disconnect"]
 
 
-def test_a_window_without_menu_entries_shows_no_menubar(make_window):
+def test_the_menubar_is_shown_because_the_view_menu_is_always_there(make_window):
     window = make_window()
-
-    assert str(window.root.cget("menu")) == ""
-
-
-def test_adding_the_first_menu_entry_shows_the_menubar(make_window):
-    window = make_window()
-
-    window.add_menu_command("File", "Connect…", lambda: None)
 
     assert str(window.root.cget("menu")) == str(window.menubar)
+    assert "View" in [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
 
 
 def test_an_unusual_menu_name_goes_after_the_usual_ones(make_window):
@@ -728,4 +726,362 @@ def test_an_unusual_menu_name_goes_after_the_usual_ones(make_window):
     window.add_menu_command("Help", "Shortcuts", lambda: None)
 
     labels = [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
-    assert labels == ["Help", "Tools"]
+    assert labels == ["File", "View", "Help", "Tools"]
+
+
+def _style(window: MainWindow) -> ttk.Style:
+    return ttk.Style(window.root)
+
+
+def _settings_with(**fields) -> Settings:
+    settings = Settings.in_memory()
+    for name, value in fields.items():
+        setattr(settings, name, value)
+    return settings
+
+
+def _window_with(tk_root, settings: Settings) -> MainWindow:
+    return MainWindow(tk.Toplevel(tk_root), Simulator, "Simulator", settings=settings)
+
+
+def test_the_dark_theme_paints_the_window_dark_and_the_light_theme_light(tk_root):
+    backgrounds = {}
+    for theme in (Theme.DARK, Theme.LIGHT):
+        window = _window_with(tk_root, _settings_with(theme=theme))
+        try:
+            backgrounds[theme] = _style(window).lookup("TFrame", "background")
+        finally:
+            window.close()
+
+    assert backgrounds[Theme.DARK] == "#232629"
+    assert backgrounds[Theme.LIGHT] == "#f0f0f0"
+
+
+def _entry_count(menu: tk.Menu) -> int:
+    last = menu.index("end")
+    return 0 if last is None else last + 1
+
+
+def _choose_in_menu(menu: tk.Menu, label: str) -> None:
+    for index in range(_entry_count(menu)):
+        if menu.type(index) != "separator" and menu.entrycget(index, "label") == label:
+            menu.invoke(index)
+            return
+    pytest.fail(f"no {label!r} entry in the menu")
+
+
+def _submenu(window: MainWindow, menu: str, label: str) -> tk.Menu:
+    parent = window.menu(menu)
+    for index in range(_entry_count(parent)):
+        if parent.type(index) == "cascade" and parent.entrycget(index, "label") == label:
+            return cast("tk.Menu", parent.nametowidget(parent.entrycget(index, "menu")))
+    pytest.fail(f"no {label!r} submenu in the {menu} menu")
+
+
+def test_choosing_a_theme_in_the_view_menu_restyles_the_window_at_once_and_saves_the_choice(tk_root, tmp_path):
+    settings = Settings.load(tmp_path)
+    window = _window_with(tk_root, settings)
+    try:
+        _choose_in_menu(_submenu(window, "View", "Theme"), "Dark")
+
+        assert _style(window).lookup("TFrame", "background") == "#232629"
+        assert str(window.root.cget("background")) == "#232629"
+        assert settings.theme is Theme.DARK
+        assert Settings.load(tmp_path).theme is Theme.DARK
+    finally:
+        window.close()
+
+
+def test_a_callback_hears_the_palette_now_and_after_every_theme_change(make_window):
+    window = make_window()
+    heard = []
+
+    window.on_theme_changed(lambda palette: heard.append(palette.name))
+    window.set_theme(Theme.DARK)
+    window.set_theme(Theme.LIGHT)
+    window.set_theme(Theme.SYSTEM)
+
+    assert heard == ["System", "Dark", "Light", "System"]
+
+
+def test_system_leaves_the_light_and_dark_themes_alone_and_uses_a_native_ttk_theme(make_window):
+    window = make_window()
+
+    window.set_theme(Theme.DARK)
+    window.set_theme(Theme.SYSTEM)
+
+    assert _style(window).theme_use() not in {"agilent34401a_dark", "agilent34401a_light"}
+    assert _style(window).lookup("TFrame", "background") != "#232629"
+
+
+def test_the_error_message_in_the_status_bar_follows_the_theme(make_window):
+    window = make_window()
+
+    window.set_theme(Theme.DARK)
+    dark = _style(window).lookup("Error.TLabel", "foreground")
+    window.set_theme(Theme.LIGHT)
+    light = _style(window).lookup("Error.TLabel", "foreground")
+
+    assert dark != light
+    assert str(window.status_error.cget("style")) == "Error.TLabel"
+
+
+def test_the_readout_keeps_its_vfd_colours_in_every_theme(make_window):
+    window = make_window()
+    before = (str(window.readout.cget("bg")), str(window.readout.cget("fg")))
+
+    window.set_theme(Theme.LIGHT)
+
+    assert (str(window.readout.cget("bg")), str(window.readout.cget("fg"))) == before
+
+
+def test_menus_follow_the_theme_including_ones_added_later(make_window):
+    window = make_window()
+    window.set_theme(Theme.DARK)
+
+    window.add_menu_command("Tools", "Something", lambda: None)
+
+    assert str(window.menu("Tools").cget("background")) == window.palette.surface
+    window.set_theme(Theme.LIGHT)
+    assert str(window.menu("Tools").cget("background")) == window.palette.surface
+    assert window.palette.name == "Light"
+
+
+def press(widget: tk.Misc, key: str) -> None:
+    """Send the key to `widget` as if typed there; Tk delivers key events to the widget that has focus."""
+    widget.focus_force()
+    widget.update()
+    widget.event_generate(f"<{key}>")
+    widget.update()
+
+
+def _shows_function(window: MainWindow, function: Function) -> bool:
+    """Whether the window shows `function` and is ready for the next change (not still waiting for the Meter)."""
+    ready = str(window.function_buttons[Function.DC_VOLTAGE].cget("state")) == "normal"
+    return ready and window.function_label.cget("text") == function.label
+
+
+def test_the_function_keys_select_the_eleven_functions_in_order(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+
+    for number, function in enumerate(Function, start=1):
+        press(window.root, f"Key-F{number}")
+        pump(window, partial(_shows_function, window, function))
+
+
+def test_r_runs_and_pauses_the_continuous_readings(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    assert window.run_button.cget("text") == "Pause"
+
+    press(window.root, "Key-r")
+    assert window.run_button.cget("text") == "Run"
+
+    press(window.root, "Key-R")
+    assert window.run_button.cget("text") == "Pause"
+
+
+def test_r_does_nothing_before_there_is_a_connection(make_window):
+    window = make_window(opener=lambda: (_ for _ in ()).throw(TransportError("no")))
+    pump(window, lambda: window.status_connection.cget("text").startswith("Connection failed"))
+
+    press(window.root, "Key-r")
+
+    assert window.run_button.cget("text") == "Run"
+
+
+def test_keys_without_ctrl_stay_quiet_while_a_text_field_has_focus(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    field = ttk.Entry(window.root)
+    field.pack()
+
+    press(field, "Key-r")
+    press(field, "Key-F3")
+
+    assert window.run_button.cget("text") == "Pause"
+    assert window.function_label.cget("text") == Function.DC_VOLTAGE.label
+
+
+def test_keys_still_work_while_a_read_only_combobox_has_focus(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+
+    press(window.range_box, "Key-r")
+
+    assert window.run_button.cget("text") == "Run"
+
+
+def test_ctrl_shortcuts_work_even_in_a_text_field(make_window):
+    window = make_window()
+    calls = []
+    window.register_shortcut("Ctrl+K", "Test", lambda: calls.append("k"))
+    field = tk.Text(window.root)
+    field.pack()
+
+    press(field, "Control-Key-k")
+
+    assert calls == ["k"]
+
+
+def test_space_does_not_fire_a_shortcut_on_top_of_a_focused_button_pressing_itself(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    calls = []
+    window.register_shortcut("Space", "Test", lambda: calls.append("space"))
+
+    press(window.run_button, "Key-space")
+    press(window.root, "Key-space")
+
+    assert calls == ["space"]
+
+
+def test_a_feature_registers_a_shortcut_and_it_runs_its_handler(make_window):
+    window = make_window()
+    calls = []
+
+    window.register_shortcut("Ctrl+L", "Record", lambda: calls.append("record"))
+    press(window.root, "Control-Key-l")
+
+    assert calls == ["record"]
+
+
+def test_a_shortcut_cannot_be_taken_twice(make_window):
+    window = make_window()
+
+    with pytest.raises(ValueError, match="already used"):
+        window.register_shortcut("F1", "Something else", lambda: None)
+
+
+def _listed(window: MainWindow) -> dict[str, tuple[str, str]]:
+    table = window.shortcuts_table
+    rows = (table.item(row, "values") for row in table.get_children())
+    return {str(row[0]): (str(row[1]), str(row[2])) for row in rows}
+
+
+def test_help_shortcuts_lists_every_shortcut_marking_the_planned_ones(make_window):
+    window = make_window()
+
+    _choose_in_menu(window.menu("Help"), "Shortcuts")
+
+    listed = _listed(window)
+    assert [f"F{number}" for number in range(1, 12)] == [key for key in listed if key.startswith("F")]
+    assert listed["F2"][0] == "Select AC V"
+    assert listed["R"][1] == ""
+    for planned in ("Space", "Ctrl+L", "Ctrl+K", "Ctrl+,"):
+        assert "planned" in listed[planned][1]
+
+
+def test_a_planned_shortcut_is_listed_as_available_once_a_feature_registers_it(make_window):
+    window = make_window()
+    window.register_shortcut("Ctrl+K", "Open the SCPI console", lambda: None)
+
+    window.show_shortcuts()
+
+    assert _listed(window)["Ctrl+K"] == ("Open the SCPI console", "")
+    assert "planned" in _listed(window)["Ctrl+L"][1]
+
+
+def test_asking_for_the_shortcuts_twice_shows_one_window(make_window):
+    window = make_window()
+
+    window.show_shortcuts()
+    first = window.shortcuts_dialog
+    window.show_shortcuts()
+
+    assert window.shortcuts_dialog is first
+
+
+def _shown(*widgets: tk.Misc) -> list[bool]:
+    return [bool(widget.winfo_ismapped()) for widget in widgets]
+
+
+def _compact_toggle(window: MainWindow) -> None:
+    _choose_in_menu(window.menu("View"), "Compact mode")
+
+
+def test_compact_mode_keeps_only_the_readout_the_function_buttons_and_the_range(tk_root):
+    window = _window_with(tk_root, _settings_with(compact_mode=True))
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+        window.root.update()
+
+        kept = [window.readout, window.function_label, window.function_buttons[Function.DC_VOLTAGE], window.range_box]
+        dropped = [window.setup_label, window.run_button, window.resolution_box, window.nplc_box, window.raw_check]
+        assert all(_shown(*kept))
+        assert not any(_shown(*dropped))
+        assert not any(_shown(window.notebook))
+    finally:
+        window.close()
+
+
+def test_the_view_menu_switches_compact_mode_on_and_off_and_saves_it(tk_root, tmp_path):
+    settings = Settings.load(tmp_path)
+    window = _window_with(tk_root, settings)
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+        _compact_toggle(window)
+        window.root.update()
+
+        assert settings.compact_mode is True
+        assert Settings.load(tmp_path).compact_mode is True
+        assert not window.run_button.winfo_ismapped()
+
+        _compact_toggle(window)
+        window.root.update()
+
+        assert Settings.load(tmp_path).compact_mode is False
+        assert window.run_button.winfo_ismapped()
+        assert window.setup_label.winfo_ismapped()
+        assert window.resolution_box.winfo_ismapped()
+        assert window.notebook.winfo_ismapped()
+    finally:
+        window.close()
+
+
+def test_leaving_compact_mode_puts_everything_back_in_its_place(tk_root):
+    window = _window_with(tk_root, _settings_with(compact_mode=True))
+    try:
+        window.set_compact(compact=False)
+        window.root.update()
+
+        order = sorted(
+            (window.run_button, window.range_box, window.resolution_box, window.nplc_box, window.raw_check),
+            key=lambda widget: widget.winfo_x(),
+        )
+        assert order == [window.run_button, window.range_box, window.resolution_box, window.nplc_box, window.raw_check]
+        assert window.setup_label.winfo_y() < window.readout.winfo_y()
+    finally:
+        window.close()
+
+
+def test_compact_mode_still_takes_readings_and_r_still_pauses(tk_root):
+    window = _window_with(tk_root, _settings_with(compact_mode=True))
+    try:
+        pump(window, lambda: shows_reading(window))
+
+        press(window.root, "Key-r")
+
+        assert window.run_button.cget("text") == "Run"
+    finally:
+        window.close()
+
+
+def _ignore_palette(_window: MainWindow, _palette: object) -> None:
+    pass
+
+
+def test_a_closed_window_is_freed_at_once_not_by_the_cycle_collector_in_whichever_thread_runs_it(tk_root):
+    """Tk variables must be finalised on the main thread, so a closed window may not sit in a reference cycle."""
+    gc.disable()
+    try:
+        window = _window_with(tk_root, Settings.in_memory())
+        window.register_shortcut("Ctrl+L", "Record", window.close)  # a handler that is a method of the window
+        window.on_theme_changed(partial(_ignore_palette, window))
+        window.close()
+        freed = weakref.ref(window)
+        del window
+        assert freed() is None
+    finally:
+        gc.enable()

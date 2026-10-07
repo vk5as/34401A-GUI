@@ -4,6 +4,7 @@ The tab keeps the History itself. Readings are added as they arrive, which is ch
 most a few times a second, only if something changed, however fast the Meter or the Simulator is going.
 """
 
+import contextlib
 import logging
 import math
 import tkinter as tk
@@ -13,14 +14,16 @@ from typing import TYPE_CHECKING, Any
 
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk  # type: ignore[attr-defined]
+from matplotlib.collections import LineCollection
+from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
 
+from agilent34401a.gui.themes import LIGHT, Palette
 from agilent34401a.history import History, HistoryEntry
 from agilent34401a.meter import Reading, Resolution, format_reading
 from agilent34401a.settings import Settings, XAxis
 
 if TYPE_CHECKING:
-    from matplotlib.collections import LineCollection
     from matplotlib.text import Text
 
     from agilent34401a.gui.main_window import MainWindow
@@ -72,6 +75,7 @@ class ChartTab(ttk.Frame):
         self._setting_limits = False
         self._marker_positions: list[float] = []
         self._marker_artists: list[LineCollection | Text] = []
+        self._palette = LIGHT
 
         self._x_axis_var = tk.StringVar(value=settings.chart_x_axis.value)
         self.length_var = tk.StringVar(value=str(self.history.length))
@@ -134,6 +138,38 @@ class ChartTab(ttk.Frame):
         for name in _STATISTICS:
             ttk.Label(strip, text=name).pack(side="left", padx=(8, 3))
             ttk.Label(strip, textvariable=self._statistic_vars[name], font="TkFixedFont").pack(side="left")
+
+    # --- colours ------------------------------------------------------------------------------------------------
+
+    def apply_palette(self, palette: Palette) -> None:
+        """Paint the chart and its toolbar in the theme's colours, which ttk styles cannot reach."""
+        self._palette = palette
+        self.figure.set_facecolor(palette.background)
+        self.axes.set_facecolor(palette.field_background)
+        for spine in self.axes.spines.values():
+            spine.set_edgecolor(palette.border)
+        self.axes.tick_params(colors=palette.foreground)
+        self.axes.xaxis.label.set_color(palette.foreground)
+        self.axes.yaxis.label.set_color(palette.foreground)
+        self.axes.grid(visible=True, color=palette.border, alpha=0.5)
+        self.line.set_color(palette.accent)
+        self.toolbar.configure(background=palette.background)
+        for child in self.toolbar.winfo_children():
+            with contextlib.suppress(tk.TclError):  # not every toolbar widget has a background to set
+                child.configure(background=palette.background)  # type: ignore[call-arg]
+        if self._marker_artists:
+            self._draw()  # the Break Markers are drawn afresh in the new colour
+        else:
+            self.canvas.draw_idle()  # type: ignore[no-untyped-call]
+
+    def break_marker_colours(self) -> list[str]:
+        """Return the colour of each Break Marker line as last drawn, as #rrggbb."""
+        return [
+            to_hex(colour)
+            for artist in self._marker_artists
+            if isinstance(artist, LineCollection)
+            for colour in artist.get_colors()
+        ]
 
     # --- the x-axis ---------------------------------------------------------------------------------------------
 
@@ -241,7 +277,9 @@ class ChartTab(ttk.Frame):
             return
         transform = self.axes.get_xaxis_transform()
         self._marker_artists.append(
-            self.axes.vlines(positions, 0, 1, transform=transform, colors="tab:red", linestyles="dashed", linewidth=1)
+            self.axes.vlines(
+                positions, 0, 1, transform=transform, colors=self._palette.warning, linestyles="dashed", linewidth=1
+            )
         )
         for position, entry in list(zip(positions, breaks, strict=True))[-_MAX_LABELLED_BREAKS:]:
             self._marker_artists.append(
@@ -254,7 +292,7 @@ class ChartTab(ttk.Frame):
                     va="top",
                     ha="left",
                     fontsize="small",
-                    color="tab:red",
+                    color=self._palette.warning,
                 )
             )
 
@@ -361,6 +399,7 @@ def install_chart(window: "MainWindow") -> ChartTab:
     chart = ChartTab(window.notebook, window.settings)
     window.add_tab("Chart", chart)
     window.add_reading_listener(chart.on_reading)
+    window.on_theme_changed(chart.apply_palette)
     window.add_menu_command("File", "Export chart as PNG…", lambda: chart.ask_export("png"))
     window.add_menu_command("File", "Export chart as SVG…", lambda: chart.ask_export("svg"))
     window.add_menu_command("View", "Clear History", chart.clear)

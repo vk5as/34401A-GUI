@@ -3,14 +3,16 @@ import time
 import tkinter as tk
 from collections.abc import Callable, Iterator
 
+import matplotlib.colors
 import numpy as np
 import pytest
 
 from agilent34401a.applied_signal import AppliedSignal
 from agilent34401a.gui.chart_tab import ChartTab
 from agilent34401a.gui.main_window import MainWindow
+from agilent34401a.gui.themes import DARK
 from agilent34401a.meter import Function, Reading, parse_reading
-from agilent34401a.settings import Settings, XAxis
+from agilent34401a.settings import Settings, Theme, XAxis
 from agilent34401a.sim import Simulator
 from tests.conftest import collect_tk_garbage
 from tests.test_gui_app import TIMEOUT_S, pump, pump_for
@@ -459,3 +461,27 @@ def test_a_long_history_is_redrawn_less_often_than_a_short_one(make_chart):
         chart.add_reading(reading(float(index)), index * 0.001)
 
     assert chart.refresh_interval_ms > short
+
+
+def test_the_chart_takes_its_colours_from_the_window_theme_and_follows_changes(make_window):
+    window = make_window(Simulator())
+    window.set_theme(Theme.LIGHT)
+    light = window.chart.figure.get_facecolor()
+
+    window.set_theme(Theme.DARK)
+
+    assert matplotlib.colors.to_hex(window.chart.figure.get_facecolor()) == DARK.background
+    assert matplotlib.colors.to_hex(window.chart.axes.get_facecolor()) == DARK.field_background
+    assert matplotlib.colors.to_hex(window.chart.line.get_color()) == DARK.accent
+    assert window.chart.figure.get_facecolor() != light
+
+
+def test_break_markers_are_drawn_in_the_themes_warning_colour(make_window):
+    window = make_window(Simulator())
+    window.set_theme(Theme.DARK)
+    feed(window.chart, [1.0])
+    feed(window.chart, [2.0], Function.FREQUENCY, start=1.0)
+
+    marker_colours = set(window.chart.break_marker_colours())
+
+    assert marker_colours == {DARK.warning}

@@ -1,8 +1,12 @@
 """The single thread that ever touches the Meter's Transport (ADR-0002).
 
 The GUI and CLI never call into the Transport or Driver themselves. They send the Worker requests
-(`start_continuous`, `pause`, `apply_setup`, `shutdown`) and learn what happened from the events it puts on
-the queue it was given, which Tk drains with `after()`.
+(`connect`, `start_continuous`, `pause`, `apply_setup`, `disconnect`, `shutdown`) and learn what happened from the
+events it puts on the queue it was given, which Tk drains with `after()`.
+
+One Worker serves one Connection at a time but many in turn: `connect` opens one, `disconnect` (or a lost Connection)
+returns the Meter to Local and closes it, and the same thread then waits for the next `connect`. Whoever holds the
+Worker therefore never has to swap it for a new one.
 """
 
 import logging
@@ -15,9 +19,15 @@ from dataclasses import dataclass
 from functools import partial
 
 from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
-from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, MeterError, TransportTimeoutError
+from agilent34401a.errors import (
+    CalibrationBlockedError,
+    MalformedReplyError,
+    MeterError,
+    TransportError,
+    TransportTimeoutError,
+)
 from agilent34401a.meter import Function, Reading, Setup, Terminals, reading_timeout
-from agilent34401a.transport import Transport
+from agilent34401a.transport import LocalControl, Transport
 
 _LOG = logging.getLogger(__name__)
 
@@ -123,6 +133,13 @@ class ReadingFailed:
 
 
 @dataclass(frozen=True)
+class ConnectionLost:
+    """The Connection dropped while it was in use (cable pulled, Meter powered off). It is followed by `Disconnected`."""
+
+    message: str
+
+
+@dataclass(frozen=True)
 class RawReplied:
     """A raw command went to the Meter. `reply` is its answer, or None if it was not a query."""
 
@@ -160,7 +177,7 @@ class WorkerFailed:
 
 @dataclass(frozen=True)
 class Disconnected:
-    """The Worker has closed the Transport and its thread is about to exit. Always the last event."""
+    """The Worker has returned the Meter to Local and closed the Transport. Always the last event of a Connection."""
 
 
 Event = (
@@ -180,6 +197,7 @@ Event = (
     | AdminFailed
     | SetupFailed
     | ReadingFailed
+    | ConnectionLost
     | WorkerFailed
     | Disconnected
 )
@@ -198,6 +216,16 @@ class _Pause:
 @dataclass(frozen=True)
 class _Shutdown:
     pass
+
+
+@dataclass(frozen=True)
+class _Disconnect:
+    pass
+
+
+@dataclass(frozen=True)
+class _Connect:
+    open_transport: Callable[[], Transport]
 
 
 @dataclass(frozen=True)
@@ -227,11 +255,11 @@ class _System:
     then: Event | None = None  # reported last, once everything above has worked
 
 
-_Request = _Run | _Pause | _Shutdown | _Apply | _Select | _System | _Raw
+_Request = _Run | _Pause | _Shutdown | _Disconnect | _Connect | _Apply | _Select | _System | _Raw
 
 
 class Worker:
-    """Owns one Connection on its own thread and reports through `events`.
+    """Owns the Connection on its own thread and reports through `events`.
 
     While Continuous runs, the Worker looks at the Meter's status byte every `error_check_interval_s` seconds and
     drains the error queue only if it says there is something in it (ADR-0005). `clock` is replaceable for tests.
@@ -239,13 +267,13 @@ class Worker:
 
     def __init__(
         self,
-        open_transport: Callable[[], Transport],
+        open_transport: Callable[[], Transport] | None,
         events: "queue.Queue[Event]",
         *,
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._open_transport = open_transport
+        self._first_connection = open_transport
         self._events = events
         self.error_check_interval_s = error_check_interval_s
         self._clock = clock
@@ -254,8 +282,18 @@ class Worker:
         self._thread = threading.Thread(target=self._main, name="agilent34401a-worker", daemon=True)
 
     def start(self) -> None:
-        """Open the Connection and begin serving requests."""
+        """Begin serving requests, first opening the Connection this Worker was created with, if any."""
+        if self._first_connection is not None:
+            self.connect(self._first_connection)
         self._thread.start()
+
+    def connect(self, open_transport: Callable[[], Transport]) -> None:
+        """Open a Connection with `open_transport` (called on the Worker's thread), closing the current one first."""
+        self._requests.put(_Connect(open_transport))
+
+    def disconnect(self) -> None:
+        """Return the Meter to Local and close the Connection, without waiting; `Disconnected` says when it is done."""
+        self._requests.put(_Disconnect())
 
     def start_continuous(self) -> None:
         """Take Readings one after another until `pause` or `shutdown`."""
@@ -328,7 +366,7 @@ class Worker:
         return self._thread.is_alive()
 
     def shutdown(self, timeout: float = _DEFAULT_SHUTDOWN_TIMEOUT_S) -> bool:
-        """Ask the Worker to close the Transport and exit; return whether it did within `timeout` seconds."""
+        """Ask the Worker to close the Connection and exit; return whether it did within `timeout` seconds."""
         if self._thread.ident is None:
             return True  # never started, so there is no Transport to close
         self._requests.put(_Shutdown())
@@ -336,10 +374,26 @@ class Worker:
         return not self._thread.is_alive()
 
     def _main(self) -> None:
+        """Wait for a Connection to open, serve it, and go back to waiting, until asked to exit."""
+        request: _Request | None = None
+        while True:
+            if request is None:
+                request = self._requests.get()
+            match request:
+                case _Shutdown():
+                    return
+                case _Connect(open_transport):
+                    request = self._connection(open_transport)
+                case _:
+                    request = None  # nothing is connected, so a request meant for a Connection that has gone is dropped
+
+    def _connection(self, open_transport: Callable[[], Transport]) -> _Request | None:
+        """Run one Connection from open to close; return the request that ended it, if one did and is not for it."""
         transport: Transport | None = None
+        ended_by: _Request | None = None
         try:
             try:
-                transport = self._open_transport()
+                transport = open_transport()
                 driver = Driver(transport)
                 identity = driver.identify()
                 setup = driver.read_setup()
@@ -347,26 +401,40 @@ class Worker:
                 transport.timeout = reading_timeout(setup)
             except MeterError as error:
                 self._events.put(ConnectionFailed(str(error)))
-                return
+                return None
             self._events.put(Connected(identity, setup, terminals))
-            self._serve(driver, transport)
+            try:
+                ended_by = self._serve(driver, transport)
+            except TransportError as error:
+                _LOG.warning("The Connection was lost: %s", error)
+                self._events.put(ConnectionLost(str(error)))
         except Exception as error:  # noqa: BLE001 - the worker must never die silently; the UI reports it
             _LOG.exception("The Worker failed unexpectedly")
             self._events.put(WorkerFailed(f"{type(error).__name__}: {error}"))
         finally:
             if transport is not None:
-                with suppress(MeterError):
-                    transport.close()
+                self._release(transport)
             self._events.put(Disconnected())
+        return None if isinstance(ended_by, _Disconnect) else ended_by
 
-    def _serve(self, driver: Driver, transport: Transport) -> None:
+    @staticmethod
+    def _release(transport: Transport) -> None:
+        """Give the Meter back to its front panel (ADR-0004), then close the Transport. Neither may fail the exit."""
+        with suppress(MeterError):
+            if isinstance(transport, LocalControl):
+                transport.go_to_local()
+        with suppress(MeterError):
+            transport.close()
+
+    def _serve(self, driver: Driver, transport: Transport) -> _Request:
+        """Serve requests until one ends the Connection, and return it."""
         running = False
         while True:
             congested = running and self._events.qsize() >= _MAX_PENDING_EVENTS
             request = self._next_request(running=running, congested=congested)
             match request:
-                case _Shutdown():
-                    return
+                case _Shutdown() | _Disconnect() | _Connect():
+                    return request
                 case _Run():
                     if not running:
                         self._next_error_check = self._clock() + self.error_check_interval_s

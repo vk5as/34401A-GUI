@@ -1,9 +1,10 @@
 """The Connection opener: turns connection settings into a Transport, choosing the VISA Backend (ADR-0001)."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from agilent34401a.backend import Backend, BackendStatus, detect_backends, resolve_backend
+from agilent34401a.errors import MeterError
 from agilent34401a.transport import Transport
 
 _DEFAULT_GPIB_ADDRESS = 22
@@ -60,3 +61,49 @@ def open_transport(
         open_visa = open_visa or visa.open_visa_transport
     backend = resolve_backend(settings.backend, detect(settings.backend))
     return open_visa(backend.library, settings.resource_name)
+
+
+def detect_all_backends() -> Mapping[Backend, BackendStatus]:
+    """Check every concrete Backend against the real pyvisa, for the connection dialog to show."""
+    from agilent34401a import visa  # noqa: PLC0415 - nothing needs pyvisa until a real check is wanted
+
+    return detect_backends(visa.check_library)
+
+
+ListVisa = Callable[[str], Sequence[str]]
+
+
+@dataclass(frozen=True)
+class BackendScan:
+    """What one Backend found on a Scan: the resources it can see, or why it could not look."""
+
+    resources: tuple[str, ...] = ()
+    problem: str = ""
+
+
+def scan_resources(
+    requested: Backend,
+    *,
+    detect: DetectBackends | None = None,
+    list_visa: ListVisa | None = None,
+) -> dict[Backend, BackendScan]:
+    """List the resources each Backend `requested` stands for can see (all of them for Auto).
+
+    A Backend that is not available, or fails to look, is reported with its reason and does not hide the others.
+    `detect` and `list_visa` are the seams tests replace to avoid needing VISA installed.
+    """
+    if detect is None or list_visa is None:
+        from agilent34401a import visa  # noqa: PLC0415 - nothing needs pyvisa until a real Scan is wanted
+
+        detect = detect or (lambda backend: detect_backends(visa.check_library, backend))
+        list_visa = list_visa or visa.list_resources
+    scans: dict[Backend, BackendScan] = {}
+    for backend, status in detect(requested).items():
+        if not status.available:
+            scans[backend] = BackendScan(problem=status.reason)
+            continue
+        try:
+            scans[backend] = BackendScan(resources=tuple(list_visa(backend.library)))
+        except MeterError as error:
+            scans[backend] = BackendScan(problem=str(error))
+    return scans

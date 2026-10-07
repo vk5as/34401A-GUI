@@ -5,14 +5,17 @@ import logging
 import queue
 import tkinter as tk
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Any, Literal
 
 from agilent34401a import __version__
+from agilent34401a.connection import detect_all_backends, open_transport, scan_resources
 from agilent34401a.errors import InvalidSetupError
 from agilent34401a.gui.chart_tab import install_chart
+from agilent34401a.gui.connection_dialog import ConnectionDialog, Detect, Scan
 from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.gui.sense_tab import SenseTab
@@ -30,11 +33,13 @@ from agilent34401a.meter import (
     format_reading,
 )
 from agilent34401a.rate import ReadingRate
-from agilent34401a.settings import Settings, Theme
+from agilent34401a.settings import LastConnection, Settings, Theme
+from agilent34401a.sim import DEMO_SIGNALS, Simulator
 from agilent34401a.transport import Transport
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
+    ConnectionLost,
     Disconnected,
     ErrorsReported,
     Event,
@@ -60,6 +65,10 @@ _FIXED = "Fixed"
 _NOT_APPLICABLE = "—"
 _FUNCTION_COLUMNS = 6
 _MENU_ORDER = ("File", "View", "Help")
+_CONNECT = "Connect…"
+_DISCONNECT = "Disconnect"
+_RECONNECT_HINT = f"Choose File > {_CONNECT} to connect again."
+_SIMULATOR = "Simulator"
 # Shortcuts for features that arrive later; each shows as unavailable in Help until its feature registers it.
 _PLANNED_SHORTCUTS = (
     ("Space", "Take a single Reading"),
@@ -81,22 +90,63 @@ def _vfd_label(parent: tk.Frame, text: str, font: tkfont.Font, *, anchor: Litera
     return label
 
 
-class MainWindow:
-    """Shows Continuous Readings from one Meter. All Meter traffic goes through its Worker thread (ADR-0002)."""
+MakeOpener = Callable[[LastConnection], Callable[[], Transport]]
+"""Turns the Connection the user chose into the function that opens its Transport on the Worker's thread."""
 
-    def __init__(
+
+def opener_for(choice: LastConnection) -> Callable[[], Transport]:
+    """Open a Connection the real way: the in-process Simulator, or the Meter through the chosen Backend."""
+    if choice.simulate:
+        return lambda: Simulator(signals=DEMO_SIGNALS)
+    return lambda: open_transport(choice.connection)
+
+
+def describe_connection(choice: LastConnection) -> str:
+    """Name the resource of `choice` as the status bar shows it."""
+    return _SIMULATOR if choice.simulate else choice.connection.resource_name
+
+
+@dataclass(frozen=True)
+class _Connection:
+    """A Connection waiting for its turn: how to open it, what to call it, and whether to remember it."""
+
+    open_transport: Callable[[], Transport]
+    resource: str
+    choice: LastConnection | None
+
+
+class MainWindow:
+    """Shows Continuous Readings from one Meter. All Meter traffic goes through its Worker thread (ADR-0002).
+
+    Each Connection gets a Worker of its own, so the Worker that owns a Transport is the only thing that ever
+    touches it, and a new Connection starts only after the previous one has been returned to Local and closed.
+    Pass `open_transport` to connect straight away; otherwise the window starts not connected.
+    """
+
+    def __init__(  # noqa: PLR0913 - the seams (opener, detection, Scan) are what the tests replace
         self,
         root: tk.Tk | tk.Toplevel,
-        open_transport: Callable[[], Transport],
-        resource: str,
+        open_transport: Callable[[], Transport] | None = None,
+        resource: str = "",
         *,
         settings: Settings | None = None,
+        make_opener: MakeOpener | None = None,
+        detect: Detect | None = None,
+        scan: Scan | None = None,
     ) -> None:
         self.root = root
         self.settings = settings if settings is not None else Settings.in_memory()
+        self._make_opener = make_opener or opener_for
+        self._detect = detect or detect_all_backends
+        self._scan = scan or scan_resources
+        self.connection_dialog: ConnectionDialog | None = None
         self._resource = resource
         self._events: queue.Queue[Event] = queue.Queue()
-        self._worker = Worker(open_transport, self._events, error_check_interval_s=self.settings.error_check_interval_s)
+        self._worker = Worker(None, self._events, error_check_interval_s=self.settings.error_check_interval_s)
+        self._has_connection = False  # the Worker has been asked to connect and has not yet said `Disconnected`
+        self._retiring = False  # the Worker has been asked to return the Meter to Local and close
+        self._next: _Connection | None = None  # what to connect to once the Worker has finished
+        self._choice: LastConnection | None = None  # the Connection to remember once it has connected
         self._event_handlers: list[Callable[[Event], None]] = []
         self._rate = ReadingRate()
         self._running = False
@@ -117,6 +167,8 @@ class MainWindow:
         self._worker.start()
         self._ticks = 0
         self._poll_id = root.after(_POLL_MS, self._drain)
+        if open_transport is not None:
+            self._connect(_Connection(open_transport, resource, None))
 
     def _build(self) -> None:
         self._theme_callbacks: list[Callable[[Palette], None]] = []
@@ -129,6 +181,7 @@ class MainWindow:
         self._menus: dict[str, tk.Menu] = {}
         self.palette = apply_theme(self.root, self.settings.theme)
         style_menu(self.menubar, self.palette)
+        self._build_connection_menu()
         self.notebook = ttk.Notebook(self.root)  # shown by add_tab once there is a tab to show
         self._has_tabs = False
         self._build_tabs()
@@ -225,7 +278,7 @@ class MainWindow:
 
     @property
     def worker(self) -> Worker:
-        """The Worker that owns the Connection; tabs send their requests to it."""
+        """The Worker that owns the Connection, whichever Connection that is; tabs send their requests to it."""
         return self._worker
 
     def add_event_handler(self, handler: Callable[[Event], None]) -> None:
@@ -382,7 +435,7 @@ class MainWindow:
     def _build_status_bar(self) -> None:
         status = ttk.Frame(self.root, relief="sunken", padding=(6, 2))
         status.pack(fill="x", side="bottom")
-        self.status_connection = ttk.Label(status, text="Connecting…")
+        self.status_connection = ttk.Label(status, text="Not connected")
         self.status_identity = ttk.Label(status, text="")
         self.status_terminals = ttk.Label(status, text="")
         self.status_message = ttk.Label(status, text="")
@@ -395,12 +448,120 @@ class MainWindow:
         self.status_error.pack(side="right", padx=(0, 12))
         self.status_message.pack(side="left", fill="x", expand=True)
 
+    def _build_connection_menu(self) -> None:
+        self.add_menu_command("File", _CONNECT, self.show_connection_dialog)
+        self.add_menu_command("File", _DISCONNECT, self.disconnect)
+        self._update_connection_menu()
+
+    def _update_connection_menu(self) -> None:
+        active = self._has_connection and not self._retiring
+        self.menu("File").entryconfigure(_DISCONNECT, state="normal" if active else "disabled")
+
+    def show_connection_dialog(self) -> None:
+        """Ask which Meter (or the Simulator) to connect to. Only one dialog is open at a time."""
+        if self.connection_dialog is not None and self.connection_dialog.is_open:
+            self.connection_dialog.window.lift()
+            return
+        self.connection_dialog = ConnectionDialog(
+            self.root,
+            detect=self._detect,
+            scan=self._scan,
+            on_connect=self._on_dialog_connect,
+            initial=self.settings.last_connection,
+            auto_reconnect=self.settings.auto_reconnect,
+        )
+
+    def _on_dialog_connect(self, choice: LastConnection, auto_reconnect: bool) -> None:  # noqa: FBT001
+        self.settings.auto_reconnect = auto_reconnect
+        self._save_settings()
+        self.connect(choice)
+
+    def connect(self, choice: LastConnection) -> None:
+        """Connect to the Meter (or Simulator) `choice` names, first finishing with any Connection already open."""
+        self._connect(_Connection(self._make_opener(choice), describe_connection(choice), choice))
+
+    def disconnect(self) -> None:
+        """Return the Meter to Local and close the Connection, without waiting for a Reading in progress."""
+        if not self._has_connection or self._retiring:
+            return
+        self._next = None
+        self._retire()
+
+    def _connect(self, connection: _Connection) -> None:
+        self._next = connection
+        if self._has_connection:
+            self._retire()
+        else:
+            self._launch()
+
+    def _retire(self) -> None:
+        """Ask the current Worker to give the Meter back to its front panel and close; `Disconnected` says when."""
+        if self._retiring:
+            return
+        self._retiring = True
+        self._end("Disconnecting…")
+        self._worker.disconnect()
+
+    def _launch(self) -> None:
+        """Start a Worker for the Connection that is waiting, with the window cleared of the previous one."""
+        connection, self._next = self._next, None
+        if connection is None:
+            return
+        self._resource = connection.resource
+        self._choice = connection.choice
+        self._connected = False
+        self._ended = False
+        self._busy = False
+        self._running = False
+        self._setup = None
+        self._last = None
+        self._rate.reset()
+        self._clear_display()
+        self.status_connection.configure(text="Connecting…")
+        self._has_connection = True
+        self._worker.connect(connection.open_transport)
+        self._update_connection_menu()
+
+    def _clear_display(self) -> None:
+        self.readout.configure(text=NO_READING)
+        self.function_label.configure(text=Function.DC_VOLTAGE.label)
+        self.setup_label.configure(text="")
+        self._function_var.set("")
+        self.run_button.configure(text="Run", state="disabled")
+        for button in self.function_buttons.values():
+            button.configure(state="disabled")
+        for box in (self.range_box, self.resolution_box, self.nplc_box):
+            self._fill(box, [], "", applicable=False)
+        for label in (self.status_identity, self.status_message, self.status_error, self.status_rate):
+            label.configure(text="")
+
+    def _save_settings(self) -> None:
+        try:
+            self.settings.save()
+        except OSError as error:
+            _LOG.warning("Could not save the settings: %s", error)
+            self.status_error.configure(text=f"Could not save the settings: {error}")
+
     def close(self) -> None:
-        """Shut the Worker down, then destroy the window. Safe to call more than once."""
+        """Close the dialog, return the Meter to Local and destroy the window. Safe to call more than once."""
         if self._closed:
             return
+        if self.connection_dialog is not None:
+            self.connection_dialog.close()
+            self.connection_dialog = None
         self.stop()
+        self._release_tk_variables()
         self.root.destroy()
+
+    def _release_tk_variables(self) -> None:
+        """Free the window's Tk variables here, on the Tk thread, while their interpreter is still alive.
+
+        Left to the garbage collector they are freed on whichever thread it happens to run on (a Worker's, say), and
+        Tkinter raises when a variable is freed anywhere but the Tk thread.
+        """
+        for name, value in list(vars(self).items()):
+            if isinstance(value, tk.Variable):
+                delattr(self, name)
 
     def worker_is_alive(self) -> bool:
         return self._worker.is_alive()
@@ -483,7 +644,8 @@ class MainWindow:
         self._poll_id = self.root.after(_POLL_MS, self._drain)
 
     def _handle(self, event: Event) -> None:
-        self._handle_in_window(event)
+        if not self._retiring or isinstance(event, Disconnected):
+            self._handle_in_window(event)  # a Connection being closed has nothing more to tell the window
         for handler in self._event_handlers:
             handler(event)
 
@@ -516,6 +678,7 @@ class MainWindow:
                 )
                 self._show_terminals(terminals)
                 self._connected = True
+                self._remember_connection()
                 self.run_button.configure(state="normal")
                 self._show_setup(setup)
                 self._set_running(running=True)  # a window that connects starts showing Readings straight away
@@ -533,12 +696,33 @@ class MainWindow:
                 if self._setup is not None:
                     self._show_setup(self._setup)  # take the controls back to what the Meter last reported
             case ConnectionFailed(message):
-                self._end(f"Connection failed: {message}")
+                self._end(f"Connection failed: {message}", hint=_RECONNECT_HINT)
+            case ConnectionLost(message):
+                self._end(f"Connection lost: {message}", hint=_RECONNECT_HINT)
             case WorkerFailed(message):
-                self._end(f"Failed: {message}")
+                self._end(f"Failed: {message}", hint=_RECONNECT_HINT)
             case Disconnected():
-                if not self._ended:
-                    self._end("Disconnected")
+                self._on_disconnected()
+
+    def _on_disconnected(self) -> None:
+        """Move on once the Worker has returned the Meter to Local and closed the Connection: to the next, or to rest."""
+        self._has_connection = False
+        if self._retiring:
+            self._retiring = False
+            if self._next is not None:
+                self._launch()
+            else:
+                self.status_connection.configure(text="Disconnected")
+                self.status_identity.configure(text="")
+        elif not self._ended:
+            self._end("Disconnected", hint=_RECONNECT_HINT)
+        self._update_connection_menu()
+
+    def _remember_connection(self) -> None:
+        """Keep the Connection that just worked as the one to offer, and to reconnect to, next time."""
+        if self._choice is not None:
+            self.settings.last_connection = self._choice
+            self._save_settings()
 
     def _show_terminals(self, terminals: Terminals) -> None:
         self.status_terminals.configure(text=f"Terminals: {terminals.label}")
@@ -601,9 +785,12 @@ class MainWindow:
         box.configure(values=values, state="readonly" if applicable else "disabled")
         box.set(shown)
 
-    def _end(self, state: str) -> None:
+    def _end(self, state: str, *, hint: str = "") -> None:
         self._ended = True
         self.status_connection.configure(text=state)
+        if hint:
+            self.status_message.configure(text=hint)
+        self._update_connection_menu()
         self.run_button.configure(state="disabled")
         self._set_running(running=False)
         if self._setup is not None:

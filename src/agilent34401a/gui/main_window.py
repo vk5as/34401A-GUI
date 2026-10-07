@@ -80,6 +80,9 @@ class MainWindow:
         self._build_display()
         self._build_function_buttons()
         self._build_controls()
+        self.notebook = ttk.Notebook(self.root)  # shown by add_tab once there is a tab to show
+        self._has_tabs = False
+        self._build_tabs()
         self._build_status_bar()
 
     def _build_display(self) -> None:
@@ -136,6 +139,16 @@ class MainWindow:
         box.bind("<<ComboboxSelected>>", lambda _event: handler())
         box.pack(side="left", padx=(0, 12))
         return box
+
+    def _build_tabs(self) -> None:
+        """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
+
+    def add_tab(self, title: str, tab: tk.Widget) -> None:
+        """Add a tab to the strip under the controls; `tab` must be a child of `self.notebook`."""
+        if not self._has_tabs:
+            self.notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+            self._has_tabs = True
+        self.notebook.add(tab, text=title)
 
     def _build_status_bar(self) -> None:
         status = ttk.Frame(self.root, relief="sunken", padding=(6, 2))

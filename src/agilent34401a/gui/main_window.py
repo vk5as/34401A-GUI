@@ -18,6 +18,7 @@ from agilent34401a.gui.chart_tab import install_chart
 from agilent34401a.gui.connection_dialog import ConnectionDialog, Detect, Scan, StartProbe
 from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.console import ConsoleTab
+from agilent34401a.gui.math_tab import MathTab
 from agilent34401a.gui.recording import install_recording
 from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
@@ -81,6 +82,8 @@ _PLANNED_SHORTCUTS = (
 
 _VFD_BACKGROUND = "#06130f"
 _VFD_FOREGROUND = "#4dffc3"
+FAIL_COLOUR = "#ff4d4d"
+"""The readout's colour while a Reading fails a Limit Test (HI or LO)."""
 _READOUT_FONT_SIZE = 56
 _FUNCTION_FONT_SIZE = 16
 _SETUP_FONT_SIZE = 11
@@ -266,6 +269,9 @@ class MainWindow:
         self.recording = install_recording(self)
         self.sense_tab = SenseTab(self.notebook, self._request)
         self.add_tab("Sense", self.sense_tab.frame)
+        self.math_tab = MathTab(self.notebook, self._request, self._worker.reset_statistics)
+        self.add_tab("Math", self.math_tab.frame)
+        self.add_event_handler(self.math_tab.handle)
         self._add_system_tab()
         # The console holds the Worker, not the window: a reference cycle through the window would leave Tk variables
         # to be freed by whichever thread the garbage collector happens to run on.
@@ -558,7 +564,7 @@ class MainWindow:
         self._update_connection_menu()
 
     def _clear_display(self) -> None:
-        self.readout.configure(text=NO_READING)
+        self.readout.configure(text=NO_READING, fg=_VFD_FOREGROUND)
         self.function_label.configure(text=Function.DC_VOLTAGE.label)
         self.setup_label.configure(text="")
         self._function_var.set("")
@@ -767,22 +773,29 @@ class MainWindow:
 
     def _render_readout(self) -> None:
         taken = self._last
+        limit = None if taken is None else taken.reading.limit
+        failed = limit is not None and limit.failed
         if taken is None:
             text = NO_READING
         elif self._raw.get():
             text = taken.reading.raw.strip()
         else:
             text = format_reading(taken.reading, taken.setup.resolution)
-        self.readout.configure(text=text)
+        if failed and limit is not None:
+            text = f"{text}  {limit.label}"
+        self.readout.configure(text=text, fg=FAIL_COLOUR if failed else _VFD_FOREGROUND)
 
     def _show_setup(self, setup: Setup) -> None:
         """Show the Setup the Meter reported on the readout and in the controls."""
-        if self._setup is not None and self._setup.function is not setup.function:
-            self._last = None  # a Reading of the old Function means nothing under the new one
+        if self._setup is not None and (self._setup.function is not setup.function or self._setup.math != setup.math):
+            self._last = None  # a Reading of the old Function or Math Operation means nothing under the new one
             self._render_readout()
         self._setup = setup
         self._function_var.set(setup.function.value)
-        self.function_label.configure(text=setup.function.label)
+        operation = setup.math.operation
+        self.function_label.configure(
+            text=setup.function.label if operation is None else f"{setup.function.label} · {operation.label}"
+        )
         self.setup_label.configure(text=describe_setup(setup))
         self._sync_controls(setup)
 
@@ -817,6 +830,7 @@ class MainWindow:
         else:
             self._fill(self.nplc_box, [], _NOT_APPLICABLE, applicable=False)
         self.sense_tab.show(setup, enabled=enabled)
+        self.math_tab.show(setup, enabled=enabled)
 
     @staticmethod
     def _fill(box: ttk.Combobox, values: list[str], shown: str, *, applicable: bool) -> None:

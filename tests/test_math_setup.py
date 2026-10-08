@@ -5,7 +5,7 @@ import math
 import pytest
 
 from agilent34401a.errors import InvalidSetupError
-from agilent34401a.math_operations import LimitResult, MathOperation, MathSettings
+from agilent34401a.math_operations import LimitResult, MathOperation, MathSettings, offset_that_nulls
 from agilent34401a.meter import Function, Reading, Setup, describe_setup
 
 VOLTAGE_FUNCTIONS = [Function.DC_VOLTAGE, Function.AC_VOLTAGE]
@@ -149,3 +149,11 @@ def test_a_reading_has_no_limit_result_unless_a_limit_test_gave_one():
     assert Reading(1.5, Function.DC_VOLTAGE, "x").limit is None
     assert Reading(1.5, Function.DC_VOLTAGE, "x", limit=LimitResult.HIGH).limit is LimitResult.HIGH
     assert [result.label for result in LimitResult] == ["PASS", "LO", "HI"]
+
+
+def test_capturing_an_unnulled_reading_makes_that_reading_the_offset():
+    assert offset_that_nulls(1.25, nulled_by=None) == 1.25
+
+
+def test_capturing_a_nulled_reading_adds_the_offset_it_was_already_nulled_by():
+    assert offset_that_nulls(0.75, nulled_by=0.25) == 1.0

@@ -94,6 +94,15 @@ def limit_result_from_status(questionable_events: int) -> LimitResult:
     return LimitResult.PASS
 
 
+def offset_that_nulls(value: float, *, nulled_by: float | None) -> float:
+    """Return the Null offset that makes a Reading of `value` read zero.
+
+    `nulled_by` is the offset the Reading was already nulled by, or None if it was not nulled: a nulled Reading is the
+    measured value minus that offset, so the offset to capture is the Reading plus it.
+    """
+    return value + (nulled_by or 0.0)
+
+
 @dataclass(frozen=True)
 class MathSettings:
     """The Math part of a Setup. Invalid values cannot be built.

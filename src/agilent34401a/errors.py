@@ -35,3 +35,7 @@ class CalibrationBlockedError(ValueError):
 
 class BurstTooLargeError(InvalidSetupError):
     """A Burst would take more Readings than Reading Memory holds, so it is refused before anything is sent."""
+
+
+class BurstRefusedError(MeterError):
+    """The Meter would not start a Burst; the message is what its error queue said."""

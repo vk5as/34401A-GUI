@@ -2,9 +2,16 @@
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, UnrecognisedIdentityError
+from agilent34401a.burst import Burst, BurstProgress
+from agilent34401a.errors import (
+    BurstRefusedError,
+    CalibrationBlockedError,
+    InvalidSetupError,
+    MalformedReplyError,
+    UnrecognisedIdentityError,
+)
 from agilent34401a.meter import (
     NPLC_VALUES,
     AcFilter,
@@ -20,13 +27,18 @@ from agilent34401a.meter import (
 )
 from agilent34401a.raw_scpi import analyse
 from agilent34401a.transport import BusLockout, Transport
+from agilent34401a.trigger import TriggerSettings, TriggerSource
 
 SELF_TEST_TIMEOUT_S = 30.0
 """The 34401A's self-test takes about ten seconds, so `*TST?` is given three times that to reply."""
 DISPLAY_TEXT_LIMIT = 12
 """The most characters the Meter's display shows in a message."""
 _ERROR_QUEUE_STATUS_BIT = 4  # bit 2 of the status byte: the error queue is not empty
+_EVENT_SUMMARY_STATUS_BIT = 32  # bit 5 of the status byte: with *ESE 1, operation complete
 _QUOTED = 2  # a quoted string is at least its two quotes
+_INFINITE_COUNT = 9.9e37  # how the Meter says infinite when asked for its Trigger Count
+_FETCH_BASE_TIMEOUT_S = 10.0
+_FETCH_TIMEOUT_PER_READING_S = 0.05  # 512 Readings of about 16 characters take several seconds at 9600 baud
 
 # Early firmware reports HEWLETT-PACKARD, later firmware Agilent Technologies; both are the same Meter.
 _MANUFACTURERS = frozenset({"hewlett-packard", "agilent technologies"})
@@ -147,14 +159,23 @@ class Driver:
         return Identity(manufacturer=manufacturer, model=model, serial=serial, firmware=firmware, raw=raw)
 
     def read(self) -> Reading:
-        """Take one Reading in the Function of the current Setup."""
+        """Take one Reading in the Function of the current Setup.
+
+        The Meter is first put back to one immediately triggered Reading if a Preset or a Burst left it otherwise,
+        because `READ?` would wait for a bus trigger (and fail) or return several Readings. This is what Single and
+        Continuous use.
+        """
+        if not self._setup.trigger.is_single_immediate:
+            plain = replace(self._setup.trigger, source=TriggerSource.IMMEDIATE, sample_count=1, trigger_count=1)
+            self._write_trigger(plain)
+            self._setup = self._setup.with_trigger(plain)
         return parse_reading(self._transport.query("READ?"), self._setup.function)
 
     def apply(self, setup: Setup) -> list[QueuedError]:
         """Send a Setup to the Meter, then drain its error queue (ADR-0005) and return what it complained about.
 
         Settings go in a fixed order: Function, then Range, then Integration Time or Gate Time (which also set the
-        Resolution), then the AC Filter, Autozero and Input Impedance.
+        Resolution), then the AC Filter, Autozero and Input Impedance, then the trigger settings if they differ from the ones the driver knows the Meter has.
         A non-empty result means the Meter may not be in `setup`; `read_setup` says what it is in.
         """
         function = setup.function
@@ -173,6 +194,8 @@ class Driver:
             write(f"ZERO:AUTO {setup.autozero.value}")
         if setup.input_impedance is not None:
             write(f"INP:IMP:AUTO {'ON' if setup.input_impedance is InputImpedance.HIGH_IMPEDANCE else 'OFF'}")
+        if setup.trigger != self._setup.trigger:  # the Meter's trigger settings are global, not per Function
+            self._write_trigger(setup.trigger)
         self._setup = setup
         return self.drain_errors()
 
@@ -209,8 +232,110 @@ class Driver:
         if function.has_input_impedance:
             impedance = InputImpedance.HIGH_IMPEDANCE if self._read_flag("INP:IMP:AUTO?") else InputImpedance.TEN_MEGOHM
             setup = setup.with_input_impedance(impedance)
+        setup = setup.with_trigger(self.read_trigger())
         self._setup = setup
         return setup
+
+    def read_trigger(self) -> TriggerSettings:
+        """Ask the Meter for its Trigger Source, Trigger Delay, Sample Count and Trigger Count. Changes nothing."""
+        reply = self._transport.query("TRIG:SOUR?").strip().upper()
+        source = next((source for source in TriggerSource if source.value == reply), None)
+        if source is None:
+            message = f"Meter replied {reply!r} to TRIG:SOUR?, which is not IMM, BUS or EXT"
+            raise MalformedReplyError(message)
+        delay = None if self._read_flag("TRIG:DEL:AUTO?") else self._read_number("TRIG:DEL?")
+        samples = self._read_number("SAMP:COUN?")
+        triggers = self._read_number("TRIG:COUN?")
+        try:
+            return TriggerSettings(
+                source, delay, round(samples), None if triggers >= _INFINITE_COUNT else round(triggers)
+            )
+        except InvalidSetupError as error:
+            message = f"Meter reported trigger settings it does not have: {error}"
+            raise MalformedReplyError(message) from error
+
+    def _write_trigger(self, trigger: TriggerSettings) -> None:
+        for command in self._trigger_commands(trigger):
+            self._transport.write(command)
+
+    def start_burst(self, trigger: TriggerSettings) -> Burst:
+        """Start a Burst: the Meter takes `trigger.readings` Readings into Reading Memory on its own.
+
+        A Burst that does not fit in Reading Memory is refused with `BurstTooLargeError` before anything is sent. If
+        the Meter complains (it is already waiting for a trigger, say) the trigger settings it had are put back and
+        `BurstRefusedError` says what it complained of. Otherwise the Meter is flagged to report operation complete
+        in its status byte, `INIT` has been sent, and the caller waits with `wait_for_burst` (a Burst that cannot
+        take long) or `burst_progress` (polling, which can be abandoned), then `fetch_burst` and `finish_burst`.
+        """
+        trigger.check_fits_reading_memory()
+        previous = self._setup.trigger
+        self._write_trigger(trigger)
+        errors = self.drain_errors()
+        if not errors:
+            for command in ("*CLS", "*ESE 1", "INIT", "*OPC"):
+                self._transport.write(command)
+            errors = self.drain_errors()
+        if errors:
+            self._write_trigger(previous)
+            with_text = "; ".join(f"{error.code}: {error.message}" for error in errors)
+            self.drain_errors()
+            message = f"The Meter would not start the Burst ({with_text})"
+            raise BurstRefusedError(message)
+        return Burst(trigger, self._setup.with_trigger(trigger), previous)
+
+    def wait_for_burst(self, burst: Burst, *, timeout: float | None = None) -> None:
+        """Block until the Meter says the Burst is complete (`*OPC?`), for at most `timeout` seconds if given.
+
+        Only for a Burst that needs no more than one bus trigger; the Transport's timeout is restored afterwards.
+        """
+        if burst.trigger.source is TriggerSource.BUS and burst.trigger.trigger_count != 1:
+            message = "A bus-triggered Burst of several triggers must be polled with burst_progress"
+            raise ValueError(message)
+        previous = self._transport.timeout
+        if timeout is not None:
+            self._transport.timeout = timeout
+        try:
+            if burst.bus_trigger_due(0):
+                self._send_bus_trigger(burst)
+            self._read_number("*OPC?")
+        finally:
+            self._transport.timeout = previous
+
+    def burst_progress(self, burst: Burst) -> BurstProgress:
+        """Look at the Burst without waiting: send the next bus trigger if the Meter is ready, and report progress."""
+        points = int(self._read_number("DATA:POIN?"))
+        if burst.bus_trigger_due(points):
+            self._send_bus_trigger(burst)
+        return BurstProgress(points, complete=bool(self.status_byte() & _EVENT_SUMMARY_STATUS_BIT))
+
+    def _send_bus_trigger(self, burst: Burst) -> None:
+        self._transport.write("*TRG")
+        burst.triggers_sent += 1
+
+    def fetch_burst(self, burst: Burst) -> list[Reading]:
+        """Read the Burst's Readings out of Reading Memory (they stay there until the next Burst)."""
+        previous = self._transport.timeout
+        self._transport.timeout = max(
+            previous, _FETCH_BASE_TIMEOUT_S + _FETCH_TIMEOUT_PER_READING_S * burst.expected_readings
+        )
+        try:
+            reply = self._transport.query("FETC?")
+        finally:
+            self._transport.timeout = previous
+        return [parse_reading(word.strip(), burst.setup.function) for word in reply.split(",")]
+
+    def finish_burst(self, burst: Burst) -> list[QueuedError]:
+        """Put the trigger settings the Meter had before the Burst back, and return what its error queue held."""
+        self._write_trigger(burst.previous)
+        return self.drain_errors()
+
+    def _trigger_commands(self, trigger: TriggerSettings) -> list[str]:
+        return [
+            f"TRIG:SOUR {trigger.source.value}",
+            "TRIG:DEL:AUTO ON" if trigger.delay is None else f"TRIG:DEL {trigger.delay:g}",
+            f"SAMP:COUN {trigger.sample_count}",
+            "TRIG:COUN INF" if trigger.trigger_count is None else f"TRIG:COUN {trigger.trigger_count}",
+        ]
 
     def send_raw(self, command: str, *, allow_calibration: bool = False) -> RawResult:
         """Send `command` as typed, which may be several commands joined with `;`, and return the Meter's reply.

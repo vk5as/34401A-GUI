@@ -48,7 +48,7 @@ The complete set of Meter settings (Function, Range, Resolution, Integration Tim
 _Avoid_: Config, state, configuration
 
 **Preset**:
-A named Setup saved by the application, which can be re-applied to the Meter in one step. The Meter has no setup memory of its own, so Presets exist only in the application.
+A named Setup saved by the application, which can be re-applied to the Meter in one step. The Meter has no setup memory of its own, so Presets exist only in the application: they are kept in `presets.json` beside the settings, and can be exported to and imported from files. A Preset holds the Setup the Meter reported, so it never holds Autozero Once. Applying one reports every setting the Meter did not take.
 _Avoid_: Profile, saved state
 
 ### Readings

@@ -19,6 +19,7 @@ from agilent34401a.gui.connection_dialog import ConnectionDialog, Detect, Scan, 
 from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.gui.math_tab import MathTab
+from agilent34401a.gui.presets_tab import install_presets
 from agilent34401a.gui.recording import install_recording
 from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
@@ -274,6 +275,7 @@ class MainWindow:
         self.math_tab = MathTab(self.notebook, self._request, self._worker.reset_statistics)
         self.add_tab("Math", self.math_tab.frame)
         self.add_event_handler(self.math_tab.handle)
+        self.presets_tab = install_presets(self)
         self._add_system_tab()
         # The console holds the Worker, not the window: a reference cycle through the window would leave Tk variables
         # to be freed by whichever thread the garbage collector happens to run on.
@@ -668,6 +670,22 @@ class MainWindow:
             return
         self._begin_change()
         self._worker.apply_setup(wanted)
+
+    @property
+    def current_setup(self) -> Setup | None:
+        """The Setup the Meter last reported, or None before it has reported one."""
+        return self._setup
+
+    def request_setup(self, setup: Setup) -> bool:
+        """Ask the Worker to put the Meter in `setup`, locking the controls until it answers.
+
+        Returns False, having sent nothing, when there is no Connection or the Meter is busy with another change.
+        """
+        if self._setup is None or self._busy or self._ended or not self._connected:
+            return False
+        self._begin_change()
+        self._worker.apply_setup(setup)
+        return True
 
     def _on_function(self, function: Function) -> None:
         if self._setup is None or self._busy or self._ended:

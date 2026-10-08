@@ -26,6 +26,17 @@ class Transport(Protocol):
 
 
 @runtime_checkable
+class RemoteControl(Protocol):
+    """A Transport that has to be told to put the Meter in Remote (RS-232 does; GPIB's REN line does it on open).
+
+    Optional: a Transport that needs nothing, such as the Simulator or a plain socket, simply does not have it.
+    """
+
+    def go_to_remote(self) -> None:
+        """Put the Meter in Remote, so that it accepts commands."""
+
+
+@runtime_checkable
 class LocalControl(Protocol):
     """A Transport that can hand the Meter's front panel back to the user (Local).
 

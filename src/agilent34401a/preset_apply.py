@@ -7,12 +7,25 @@ the Meter reports once it has been sent. Whatever differs was rejected, and is r
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from agilent34401a.driver import QueuedError
 from agilent34401a.math_operations import MathSettings
 from agilent34401a.meter import Autozero, Setup, format_range
+from agilent34401a.preset import Preset
 from agilent34401a.trigger import TriggerSettings
+from agilent34401a.worker import (
+    ConnectionFailed,
+    ConnectionLost,
+    Disconnected,
+    ErrorsReported,
+    Event,
+    SetupChanged,
+    SetupFailed,
+    TerminalsChanged,
+    WorkerFailed,
+)
 
 # Settings are sent with "%g", which keeps six significant digits, and the Meter rounds what it is given.
 _RELATIVE_TOLERANCE = 1e-5
@@ -113,3 +126,107 @@ def _compare_math(comparison: _Comparison, wanted: MathSettings, actual: MathSet
     )
     check("Limit Test lower bound", wanted.limit_lower, actual.limit_lower, lambda value: f"{value:g}")
     check("Limit Test upper bound", wanted.limit_upper, actual.limit_upper, lambda value: f"{value:g}")
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
+@dataclass(frozen=True)
+class ApplyReport:
+    """How applying a Preset went: what the Meter did not take, what it complained of, or why it is not known.
+
+    `actual` is the Setup the Meter reported afterwards. `failure` is set instead when it could not be found out.
+    """
+
+    preset: str
+    rejections: tuple[Rejection, ...] = ()
+    errors: tuple[QueuedError, ...] = ()
+    failure: str | None = None
+    actual: Setup | None = None
+
+    @property
+    def applied(self) -> bool:
+        """Whether the Meter took every setting and queued no error."""
+        return self.failure is None and not self.rejections and not self.errors
+
+    @property
+    def summary(self) -> str:
+        name = f"Preset '{self.preset}'"
+        if self.failure is not None:
+            return f"{name} could not be confirmed: {self.failure}"
+        if self.rejections:
+            return f"{name} was only partly applied: the Meter did not take {_count(len(self.rejections), 'setting')}."
+        if self.errors:
+            return f"{name} was applied, but the Meter queued {_count(len(self.errors), 'error')}."
+        return f"{name} was applied."
+
+    @property
+    def details(self) -> tuple[str, ...]:
+        """One line for each rejected setting and each error the Meter queued."""
+        return (
+            *(str(rejection) for rejection in self.rejections),
+            *(f"Meter error {error.code}: {error.message}" for error in self.errors),
+        )
+
+
+class PresetApplier:
+    """Sends a Preset's Setup and works out how it went from the Worker's events. Feed it every event with `handle`.
+
+    `submit` sends a Setup to the Worker and says whether it did (it does not while the Meter is busy with another
+    change, or when there is no Connection). `on_report` is called with the `ApplyReport` as soon as the Meter has
+    said which Setup it is in, and once more, with the errors added, if its error queue then turns out to have held
+    some: the Worker reports those right behind the Setup, so they belong to the same Preset.
+    """
+
+    def __init__(self, submit: Callable[[Setup], bool], on_report: Callable[[ApplyReport], None]) -> None:
+        self._submit = submit
+        self._on_report = on_report
+        self._pending: Preset | None = None
+        self._latest: ApplyReport | None = None  # the report that errors reported right now would be added to
+
+    @property
+    def busy(self) -> bool:
+        """Whether a Preset has been sent and the Meter has not yet answered."""
+        return self._pending is not None
+
+    def apply(self, preset: Preset) -> bool:
+        """Send `preset`'s Setup. Returns False, having sent nothing, if one is still being applied or it was refused."""
+        if self._pending is not None or not self._submit(preset.setup):
+            return False
+        self._pending = preset
+        self._latest = None
+        return True
+
+    def handle(self, event: Event) -> None:
+        match event:
+            case SetupChanged(actual):
+                pending, self._pending = self._pending, None
+                if pending is None:
+                    self._latest = None
+                    return
+                self._report(ApplyReport(pending.name, rejected_settings(pending.setup, actual), actual=actual))
+            case ErrorsReported(errors):
+                if self._latest is not None:
+                    self._report(replace(self._latest, errors=errors))
+                self._latest = None
+            case SetupFailed(message):
+                self._fail(message)
+            case ConnectionLost(message) | ConnectionFailed(message) | WorkerFailed(message):
+                self._fail(f"the Connection ended ({message})")
+            case Disconnected():
+                self._fail("the Connection ended")
+            case TerminalsChanged():
+                pass  # reported between the Setup and its errors
+            case _:
+                self._latest = None  # anything else means the errors that went with the Setup have been and gone
+
+    def _report(self, report: ApplyReport) -> None:
+        self._latest = report
+        self._on_report(report)
+
+    def _fail(self, message: str) -> None:
+        pending, self._pending = self._pending, None
+        self._latest = None
+        if pending is not None:
+            self._on_report(ApplyReport(pending.name, failure=message))

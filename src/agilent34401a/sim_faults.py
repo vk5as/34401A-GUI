@@ -5,6 +5,7 @@ decides, line by line, what the server does instead of answering normally. Every
 rather than chance, so a test that injects a fault gets the same behaviour on every run.
 """
 
+import random
 import re
 import threading
 from dataclasses import dataclass
@@ -17,6 +18,10 @@ class Effect(Enum):
     SLOW = "slow"
     DROP = "drop"
     RESET = "reset"
+    NOISE = "noise"
+    TRUNCATED = "truncated"
+    UNTERMINATED = "unterminated"
+    WRONG_TYPE = "wrong-type"
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,32 @@ class Fault:
         """Like `drop`, but the Connection is reset rather than closed in an orderly way."""
         return cls(Effect.RESET, command=command, after=after, times=times, every=every)
 
+    @classmethod
+    def noise(
+        cls, *, seed: int = 0, command: str | None = None, after: int = 0, times: int | None = 1, every: int = 1
+    ) -> "Fault":
+        """Answer with bytes that are not text; the same `seed` gives the same bytes every time."""
+        return cls(Effect.NOISE, seed=seed, command=command, after=after, times=times, every=every)
+
+    @classmethod
+    def truncated(cls, *, command: str | None = None, after: int = 0, times: int | None = 1, every: int = 1) -> "Fault":
+        """Answer with only the first half of the reply (the line still ends)."""
+        return cls(Effect.TRUNCATED, command=command, after=after, times=times, every=every)
+
+    @classmethod
+    def unterminated(
+        cls, *, command: str | None = None, after: int = 0, times: int | None = 1, every: int = 1
+    ) -> "Fault":
+        """Answer without ending the line, so the next reply runs on from this one."""
+        return cls(Effect.UNTERMINATED, command=command, after=after, times=times, every=every)
+
+    @classmethod
+    def wrong_type(
+        cls, *, command: str | None = None, after: int = 0, times: int | None = 1, every: int = 1
+    ) -> "Fault":
+        """Answer a query that has a number for its reply with text, and any other query with a number."""
+        return cls(Effect.WRONG_TYPE, command=command, after=after, times=times, every=every)
+
 
 @dataclass(frozen=True)
 class Delivery:
@@ -76,6 +107,19 @@ class Delivery:
     reset: bool = False
 
 
+_NOISE_LENGTH = 12
+_NOISE_BYTES = bytes(byte for byte in range(0x80, 0x100))  # every one of them is invalid ASCII
+
+
+def _wrong_type(reply: str) -> str:
+    """Return a reply of the other type: text for a number, a number for anything else."""
+    try:
+        float(reply)
+    except ValueError:
+        return "+9.99000000E+00"
+    return '"NOT A NUMBER"'
+
+
 class _Armed:
     """A fault together with how often it has matched and hit so far."""
 
@@ -84,6 +128,21 @@ class _Armed:
         self._pattern = re.compile(fault.command, re.IGNORECASE) if fault.command is not None else None
         self._matches = 0
         self._hits = 0
+        # Reproducible noise for tests, not security.
+        self._random = random.Random(fault.seed)  # noqa: S311  # nosec B311
+
+    def garble(self, reply: str) -> bytes:
+        """Return the bytes this fault sends in place of `reply`."""
+        match self.fault.effect:
+            case Effect.NOISE:
+                body = bytes(self._random.choice(_NOISE_BYTES) for _ in range(_NOISE_LENGTH))
+                return body + b"\n"
+            case Effect.TRUNCATED:
+                return reply[: max(1, len(reply) // 2)].encode("ascii", errors="replace") + b"\n"
+            case Effect.UNTERMINATED:
+                return reply.encode("ascii", errors="replace")
+            case _:
+                return _wrong_type(reply).encode("ascii", errors="replace") + b"\n"
 
     def hits(self, line: str, *, is_query: bool) -> bool:
         """Count this line if the fault matches it, and say whether the fault strikes now."""
@@ -118,18 +177,24 @@ class FaultPlan:
             self._armed.clear()
 
     def deliver(self, line: str, reply: str | None) -> Delivery:
-        """Decide how `reply` (None when `line` was not a query) reaches the client."""
+        """Decide how `reply` (None when `line` was not a query) reaches the client.
+
+        Delays add up; if several faults garble the reply, the last one armed has the say.
+        """
         payload = None if reply is None else f"{reply}\n".encode("ascii", errors="replace")
         delay_s = 0.0
         hang_up = False
         reset = False
         with self._lock:
-            struck = [armed.fault for armed in self._armed if armed.hits(line, is_query=reply is not None)]
-        for fault in struck:
-            if fault.effect is Effect.SLOW:
-                delay_s += fault.delay_s
-            elif fault.effect is Effect.DROP:
-                hang_up = True
-            elif fault.effect is Effect.RESET:
-                hang_up = reset = True
+            struck = [armed for armed in self._armed if armed.hits(line, is_query=reply is not None)]
+            for armed in struck:
+                effect = armed.fault.effect
+                if effect is Effect.SLOW:
+                    delay_s += armed.fault.delay_s
+                elif effect is Effect.DROP:
+                    hang_up = True
+                elif effect is Effect.RESET:
+                    hang_up = reset = True
+                elif reply is not None:
+                    payload = armed.garble(reply)
         return Delivery(None if hang_up else payload, delay_s, hang_up, reset)

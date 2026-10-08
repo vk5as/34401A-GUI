@@ -200,3 +200,65 @@ def test_stopping_the_server_does_not_wait_for_a_slow_reply():
         assert time.monotonic() - started < TIMEOUT_S
     finally:
         client.close()
+
+
+def test_noise_replaces_the_reply_with_bytes_that_are_not_text(server):
+    server.inject(Fault.noise(seed=7))
+    with connect(server) as client:
+        client.sendall(b"*IDN?\n")
+
+        data = read_bytes(client)
+
+    assert data.endswith(b"\n")
+    assert data.count(b"\n") == 1
+    assert any(byte >= 0x80 for byte in data)
+    with pytest.raises(UnicodeDecodeError):
+        data.decode("ascii")
+
+
+def test_noise_is_the_same_for_the_same_seed_and_differs_between_seeds():
+    def noise_for(seed: int) -> bytes:
+        with SimulatorServer(port=0) as server:
+            server.inject(Fault.noise(seed=seed))
+            with connect(server) as client:
+                client.sendall(b"*IDN?\n")
+                return read_bytes(client)
+
+    assert noise_for(1) == noise_for(1)
+    assert noise_for(1) != noise_for(2)
+
+
+def test_a_truncated_reply_is_the_first_part_of_the_real_one_with_its_terminator(server):
+    server.inject(Fault.truncated())
+    with connect(server) as client:
+        reply = ask(client, "*IDN?")
+
+    assert reply.endswith("\n")
+    assert 0 < len(reply) - 1 < len(IDENTITY_LINE) - 1
+    assert IDENTITY_LINE.startswith(reply[:-1])
+
+
+def test_an_unterminated_reply_never_ends_its_line(server):
+    server.inject(Fault.unterminated())
+    with connect(server) as client:
+        client.sendall(b"*IDN?\n")
+
+        assert read_bytes(client) == IDENTITY_LINE.rstrip("\n").encode()
+
+
+def test_the_reply_after_an_unterminated_one_runs_on_from_it(server):
+    server.inject(Fault.unterminated())
+    with connect(server) as client:
+        client.sendall(b"*IDN?\nFUNC?\n")
+
+        assert read_line(client) == IDENTITY_LINE.rstrip("\n") + '"VOLT"\n'
+
+
+def test_a_reply_of_the_wrong_type_swaps_a_number_for_text_and_text_for_a_number(server):
+    server.inject(Fault.wrong_type(times=2))
+    with connect(server) as client:
+        number_query = ask(client, "READ?")
+        text_query = ask(client, "*IDN?")
+
+    assert number_query.startswith('"')
+    float(text_query)  # a number where the identity should be

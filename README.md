@@ -43,6 +43,14 @@ agilent34401a-sim --port 5025 &
 agilent34401a-cli read --backend py --resource "TCPIP::127.0.0.1::5025::SOCKET"
 ```
 
+The server can also misbehave on purpose, to see how a client copes. `--fault EFFECT[:OPTION=VALUE,...]` may be repeated;
+the effects are `slow`, `drop`, `reset`, `noise`, `truncated`, `unterminated` and `wrong-type`, and the options are
+`delay` (seconds), `command` (a regular expression), `after`, `every`, `times` and `seed`:
+
+```bash
+agilent34401a-sim --port 5025 --fault slow:delay=3,command=READ --fault drop:after=50
+```
+
 ## Development
 
 `tkinter` is a system package, not a PyPI one. On Debian/Ubuntu: `sudo apt install python3-tk xvfb`.

@@ -198,3 +198,48 @@ class FaultPlan:
                 elif reply is not None:
                     payload = armed.garble(reply)
         return Delivery(None if hang_up else payload, delay_s, hang_up, reset)
+
+
+_DEFAULT_SLOW_DELAY_S = 1.0
+_OPTIONS = ("delay", "command", "after", "times", "every", "seed")
+
+
+def parse_fault(text: str) -> Fault:
+    """Read a fault from the command line: an effect name, then `:` and comma-separated `option=value` pairs.
+
+    The effects are those of `Effect` (`slow`, `drop`, `reset`, `noise`, `truncated`, `unterminated`, `wrong-type`)
+    and the options `delay` (seconds, for `slow`), `command` (a regular expression), `after`, `every`, `times` and
+    `seed`. Unlike a fault armed from code, one given here keeps happening unless `times` says otherwise. For example
+    `slow:delay=0.5,command=READ` or `drop:after=10`.
+    """
+    name, _, rest = text.strip().partition(":")
+    try:
+        effect = Effect(name.strip().lower())
+    except ValueError:
+        known = ", ".join(effect.value for effect in Effect)
+        message = f"{name!r} is not a fault (the faults are {known})"
+        raise ValueError(message) from None
+    options: dict[str, str] = {}
+    for pair in filter(None, (part.strip() for part in rest.split(","))):
+        key, equals, value = pair.partition("=")
+        if not equals or key not in _OPTIONS:
+            message = f"{pair!r} is not an option of a fault (the options are {', '.join(_OPTIONS)}, as option=value)"
+            raise ValueError(message)
+        options[key] = value
+    try:
+        return Fault(
+            effect,
+            delay_s=float(options["delay"]) if "delay" in options else _delay_for(effect),
+            command=options.get("command"),
+            after=int(options.get("after", 0)),
+            times=int(options["times"]) if "times" in options else None,
+            every=int(options.get("every", 1)),
+            seed=int(options.get("seed", 0)),
+        )
+    except (ValueError, re.error) as error:
+        message = f"{text!r} is not a fault: {error}"
+        raise ValueError(message) from None
+
+
+def _delay_for(effect: Effect) -> float:
+    return _DEFAULT_SLOW_DELAY_S if effect is Effect.SLOW else 0.0

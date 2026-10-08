@@ -16,7 +16,7 @@ from collections.abc import Sequence
 
 from agilent34401a import __version__
 from agilent34401a.sim import AGILENT_IDENTITY, HEWLETT_PACKARD_IDENTITY, Simulator
-from agilent34401a.sim_faults import Fault, FaultPlan
+from agilent34401a.sim_faults import Fault, FaultPlan, parse_fault
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 5025  # the usual SCPI-over-socket port
@@ -216,6 +216,13 @@ def _port(text: str) -> int:
     return port
 
 
+def _fault(text: str) -> Fault:
+    try:
+        return parse_fault(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agilent34401a-sim",
@@ -228,11 +235,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--identity", choices=sorted(_IDENTITIES), default="hp", help="which firmware to pretend to be")
     parser.add_argument("--time-scale", type=float, help="1 is real time, 0 is instant (default: real time)")
+    parser.add_argument(
+        "--fault",
+        type=_fault,
+        action="append",
+        default=[],
+        metavar="EFFECT[:OPTION=VALUE,...]",
+        help=(
+            "misbehave on purpose, to test a client: slow, drop, reset, noise, truncated, unterminated or wrong-type, "
+            "with options delay (seconds), command (regular expression), after, every, times and seed, "
+            "e.g. slow:delay=0.5,command=READ or drop:after=10; may be repeated"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.time_scale is not None and args.time_scale < 0:
         parser.error("--time-scale cannot be negative")
     simulator = Simulator(identity=_IDENTITIES[args.identity], time_scale=args.time_scale)
     server = SimulatorServer(simulator, host=args.host, port=args.port)
+    for fault in args.fault:
+        server.inject(fault)
     try:
         server.bind()  # claim the port first, so the banner can name the real one
     except OSError as error:

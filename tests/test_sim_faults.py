@@ -8,8 +8,8 @@ from collections.abc import Iterator
 import pytest
 
 from agilent34401a.sim import HEWLETT_PACKARD_IDENTITY
-from agilent34401a.sim_faults import Fault
-from agilent34401a.sim_server import SimulatorServer
+from agilent34401a.sim_faults import Effect, Fault, parse_fault
+from agilent34401a.sim_server import SimulatorServer, main
 
 TIMEOUT_S = 5.0
 IDENTITY_LINE = f"{HEWLETT_PACKARD_IDENTITY}\n"
@@ -262,3 +262,73 @@ def test_a_reply_of_the_wrong_type_swaps_a_number_for_text_and_text_for_a_number
 
     assert number_query.startswith('"')
     float(text_query)  # a number where the identity should be
+
+
+def test_a_fault_is_described_on_the_command_line_as_an_effect_and_its_options():
+    fault = parse_fault("slow:delay=0.5,command=READ,after=2,times=3,every=2,seed=9")
+
+    assert (fault.effect, fault.delay_s, fault.command, fault.after, fault.times, fault.every, fault.seed) == (
+        Effect.SLOW,
+        0.5,
+        "READ",
+        2,
+        3,
+        2,
+        9,
+    )
+
+
+def test_a_fault_on_the_command_line_keeps_happening_unless_told_otherwise():
+    assert parse_fault("drop").times is None
+    assert parse_fault("drop:times=2").times == 2
+
+
+@pytest.mark.parametrize("name", [effect.value for effect in Effect])
+def test_every_effect_can_be_named_on_the_command_line(name):
+    assert parse_fault(name).effect.value == name
+
+
+@pytest.mark.parametrize(
+    "spec",
+    ["", "melt", "drop:after", "drop:after=lots", "drop:colour=red", "slow:delay=-1", "drop:command=(", "drop:every=0"],
+)
+def test_a_fault_that_makes_no_sense_is_refused_with_a_reason(spec):
+    with pytest.raises(ValueError, match=r"\w"):
+        parse_fault(spec)
+
+
+def test_the_standalone_simulator_arms_the_faults_it_is_given():
+    started: list[SimulatorServer] = []
+    original = SimulatorServer.serve_forever
+
+    def serving(self: SimulatorServer) -> None:
+        started.append(self)
+        original(self)
+
+    result: list[int] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(SimulatorServer, "serve_forever", serving)
+        thread = threading.Thread(target=lambda: result.append(main(["--port", "0", "--fault", "drop:after=1"])))
+        thread.start()
+        deadline = time.monotonic() + TIMEOUT_S
+        while not started and time.monotonic() < deadline:
+            time.sleep(0.01)
+        try:
+            with connect(started[0]) as client:
+                assert ask(client, "*IDN?") == IDENTITY_LINE
+                client.sendall(b"*IDN?\n")
+
+                assert hung_up(client)
+        finally:
+            started[0].stop()
+            thread.join(timeout=TIMEOUT_S)
+
+    assert result == [0]
+
+
+def test_the_standalone_simulator_refuses_a_fault_it_cannot_parse(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--fault", "melt"])
+
+    assert exit_info.value.code == 2
+    assert "melt" in capsys.readouterr().err

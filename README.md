@@ -50,6 +50,14 @@ and the status bar shows `REC` and the file until you stop; File → Export Hist
 the Chart is showing. The columns are `timestamp_iso, elapsed_s, function, range, value, unit, raw, math_mode,
 limit_result`. `value` is in the base unit (volts, ohms, ...), `OVLD` for an Overload, and `raw` is the Meter's own
 text. The file is UTF-8 with LF line endings; Excel needs "From Text/CSV" with UTF-8 to show the Ω unit.
+`math_mode` is the Math Operation in effect (`NULL`, `DB`, `DBM`, `STATS` or `LIMIT`; empty for none) and
+`limit_result` is `HI`, `LO` or `PASS` during a Limit Test. Under Null `value` is the Reading minus the offset, and
+under dB or dBm it is in dB or dBm, which `unit` says.
+
+The Math tab applies the Meter's Math Operations, one at a time: Null (with an offset you type or capture from the
+current Reading), dB, dBm (Reference Resistance 50 Ω to 8 kΩ), the Meter's own Statistics (minimum, maximum, average and
+count, with Reset) and a Limit Test. The readout names the Operation and turns red with HI or LO when a Reading fails
+the Limit Test. The Meter turns the Operation off when the Function changes.
 
 To exercise the real pyvisa stack without a Meter, run the Simulator as a TCP server and point the CLI at it:
 

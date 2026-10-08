@@ -9,12 +9,14 @@ import contextlib
 import math
 import socket
 import socketserver
+import struct
 import sys
 import threading
 from collections.abc import Sequence
 
 from agilent34401a import __version__
 from agilent34401a.sim import AGILENT_IDENTITY, HEWLETT_PACKARD_IDENTITY, Simulator
+from agilent34401a.sim_faults import Fault, FaultPlan
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 5025  # the usual SCPI-over-socket port
@@ -40,9 +42,18 @@ class _Handler(socketserver.StreamRequestHandler):
                 line = raw.decode("ascii", errors="replace").strip()
                 if not line:
                     continue
-                reply = self.server.process(line)
-                if reply is not None:
-                    self.wfile.write(f"{reply}\n".encode("ascii", errors="replace"))
+                delivery = self.server.faults.deliver(line, self.server.process(line))
+                if delivery.delay_s and self.server.stopping.wait(delivery.delay_s):
+                    return  # the server is shutting down, so a late reply no longer matters
+                if delivery.hang_up:
+                    if delivery.reset:
+                        # Closing with a zero linger sends a reset. The request is closed here, ahead of socketserver's
+                        # polite shutdown(), which would send an orderly end of stream first.
+                        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                        self.connection.close()
+                    return  # closing the request is what drops the connection
+                if delivery.payload is not None:
+                    self.wfile.write(delivery.payload)
                     self.wfile.flush()
         except OSError:
             return  # the client went away mid-conversation, which is its right
@@ -60,9 +71,11 @@ class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = sys.platform != "win32"
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], simulator: Simulator) -> None:
+    def __init__(self, address: tuple[str, int], simulator: Simulator, faults: FaultPlan) -> None:
         super().__init__(address, _Handler)
         self._simulator = simulator
+        self.faults = faults
+        self.stopping = threading.Event()  # wakes a handler that is holding a reply back
         self._meter_lock = threading.Lock()
         self._clients_lock = threading.Lock()
         self._clients: set[socket.socket] = set()
@@ -110,6 +123,7 @@ class SimulatorServer:
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
         self._serving = threading.Event()  # shutdown() blocks forever on a server that is not serving
+        self._faults = FaultPlan()
 
     @property
     def port(self) -> int:
@@ -122,6 +136,14 @@ class SimulatorServer:
     def resource_name(self) -> str:
         """The VISA resource that reaches this server."""
         return f"TCPIP::{self._host}::{self.port}::SOCKET"
+
+    def inject(self, fault: Fault) -> None:
+        """Arm a fault: from now on the server misbehaves as it describes, for every client, until `clear_faults`."""
+        self._faults.add(fault)
+
+    def clear_faults(self) -> None:
+        """Disarm every fault, so the Meter behaves again."""
+        self._faults.clear()
 
     def bind(self) -> None:
         """Claim the port without serving yet, so `port` and `resource_name` are known."""
@@ -154,6 +176,7 @@ class SimulatorServer:
             thread, self._thread = self._thread, None
         if server is None:
             return
+        server.stopping.set()
         if self._serving.is_set():
             server.shutdown()
         server.close_clients()
@@ -172,7 +195,7 @@ class SimulatorServer:
         if self._server is not None:
             message = "The Simulator server is already started"
             raise RuntimeError(message)
-        self._server = _Server((self._host, self._requested_port), self._simulator)
+        self._server = _Server((self._host, self._requested_port), self._simulator, self._faults)
         return self._server
 
     def _serve(self, server: _Server) -> None:

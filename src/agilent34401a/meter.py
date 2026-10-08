@@ -1,10 +1,11 @@
 """The Meter model: Functions, Setups, Readings, and turning replies into Readings and Readings into text."""
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from agilent34401a.errors import InvalidSetupError, MalformedReplyError
+from agilent34401a.trigger import TriggerSettings
 
 # Engineering prefixes by power of ten, smallest to largest.
 _PREFIXES = {-12: "p", -9: "n", -6: "µ", -3: "m", 0: "", 3: "k", 6: "M", 9: "G"}
@@ -270,6 +271,7 @@ class Setup:
     gate_time: GateTime | None = None
     autozero: Autozero | None = None
     input_impedance: InputImpedance | None = None
+    trigger: TriggerSettings = field(default_factory=TriggerSettings)
 
     def __post_init__(self) -> None:
         function = self.function
@@ -354,6 +356,9 @@ class Setup:
 
     def with_input_impedance(self, input_impedance: InputImpedance) -> "Setup":
         return replace(self, input_impedance=input_impedance)
+
+    def with_trigger(self, trigger: TriggerSettings) -> "Setup":
+        return replace(self, trigger=trigger)
 
 
 def describe_setup(setup: Setup) -> str:

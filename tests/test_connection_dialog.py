@@ -428,14 +428,17 @@ def test_choosing_a_scanned_gpib_resource_fills_in_the_board_and_address(open_di
 
 
 def test_choosing_any_other_scanned_resource_fills_in_the_resource_string(open_dialog, tk_root):
-    dialog, chosen = open_dialog()
+    def socket(_requested: Backend) -> dict[Backend, BackendScan]:
+        return {Backend.PYVISA_PY: BackendScan(resources=("TCPIP::127.0.0.1::5025::SOCKET",))}
+
+    dialog, chosen = open_dialog(scan=socket)
     scan(dialog, tk_root)
 
-    select(dialog, 1)
-    assert dialog.resource_entry.get() == "ASRL/dev/ttyUSB0::INSTR"
+    select(dialog, 0)
+    assert dialog.resource_entry.get() == "TCPIP::127.0.0.1::5025::SOCKET"
     dialog.connect_button.invoke()
 
-    assert chosen.calls[0][0].connection.resource_name == "ASRL/dev/ttyUSB0::INSTR"
+    assert chosen.calls[0][0].connection.resource_name == "TCPIP::127.0.0.1::5025::SOCKET"
 
 
 def test_choosing_a_scanned_resource_selects_the_backend_that_saw_it(open_dialog, tk_root):

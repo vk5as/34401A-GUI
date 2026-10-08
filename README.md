@@ -58,6 +58,36 @@ agilent34401a-sim --port 5025 &
 agilent34401a-cli read --backend py --resource "TCPIP::127.0.0.1::5025::SOCKET"
 ```
 
+### RS-232
+
+Choose "Meter (RS-232)" in the connection dialog (File → Connect…), or give the CLI a `--serial-port`. Pyvisa-py
+and pyserial are installed with the package, so no vendor software is needed. Every parameter is configurable;
+the defaults are the Meter's factory settings:
+
+```bash
+agilent34401a-cli read --serial-port COM3                 # 9600 baud, 8 data bits, no parity, 1 stop bit, no Flow Control
+agilent34401a-cli read --serial-port /dev/ttyUSB0 --baud 4800 --data-bits 7 --parity even --flow-control dtrdsr
+```
+
+The options are `--baud` (300 to 9600), `--data-bits` (7 or 8), `--parity` (none, even, odd), `--stop-bits` (1 or 2),
+`--flow-control` (none, xonxoff, rtscts, dtrdsr), `--terminator` (lf, cr, crlf), and `--dtr`/`--rts` (on or off)
+to hold those lines for an unusual cable. The Meter is put in Remote with `SYST:REM` when the Connection opens and
+returned to Local with `SYST:LOC` when it closes. Lockout over RS-232 is `SYST:RWL`.
+
+If you do not know the Meter's settings, use Probe: the Probe button in the dialog (with a progress bar and
+Cancel), or `agilent34401a-cli probe --serial-port COM3`. It tries every baud rate, 9600 first, with each of the
+Meter's three Framings (8N1, 7E1, 7O1) until the Meter answers `*IDN?`; tick "Include Flow Control" (or pass
+`--include-flow-control`) to try every Flow Control as well, which takes four times as long. Probe needs the port to
+itself, so disconnect first. When nothing answers it says what to check:
+
+- the cable must be a null-modem (crossed) cable, not a straight-through one;
+- the Meter's I/O menu must be set to RS-232 rather than GPIB, and its baud rate and parity set under that menu;
+- the Flow Control must match the Meter's handshake, which is why Probe can include it.
+
+Linux caveat: pyserial does not implement DTR/DSR Flow Control in hardware on Linux; it only asserts DTR, and
+never waits for DSR. Windows implements it. On Linux, DTR/DSR therefore behaves like no Flow Control with DTR held
+asserted, so use a slower baud rate if characters are lost.
+
 ## Development
 
 `tkinter` is a system package, not a PyPI one. On Debian/Ubuntu: `sudo apt install python3-tk xvfb`.

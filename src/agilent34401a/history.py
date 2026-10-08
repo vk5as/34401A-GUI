@@ -4,8 +4,9 @@ import math
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 
-from agilent34401a.meter import Function, Reading
+from agilent34401a.meter import Function, Reading, Setup
 
 DEFAULT_HISTORY_LENGTH = 10_000
 """How many Readings the History keeps unless told otherwise; the same as the setting's default."""
@@ -17,13 +18,16 @@ class HistoryEntry:
 
     `sample` counts Readings from 1 since the History was last cleared, so it does not change when older Readings
     are forgotten. `timestamp` is the `time.monotonic()` seconds the Worker stamped on the Reading. A True
-    `follows_break` means a Break Marker sits just before this Reading.
+    `follows_break` means a Break Marker sits just before this Reading. `setup` and `taken_at` (the wall-clock time)
+    are what a CSV export needs besides the Reading itself; they are None for a Reading added without them.
     """
 
     sample: int
     reading: Reading
     timestamp: float
     follows_break: bool = False
+    setup: Setup | None = None
+    taken_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -110,13 +114,15 @@ class History:
         """Return a snapshot of the Readings, oldest first."""
         return tuple(self._entries)
 
-    def add(self, reading: Reading, timestamp: float) -> HistoryEntry:
+    def add(
+        self, reading: Reading, timestamp: float, *, setup: Setup | None = None, taken_at: datetime | None = None
+    ) -> HistoryEntry:
         """Record a Reading, forgetting the oldest if the History is full, and return its entry."""
         follows_break = bool(self._entries) and _breaks(self._entries[-1].reading, reading)
         if self._started_at is None:
             self._started_at = timestamp
         self._count += 1
-        entry = HistoryEntry(self._count, reading, timestamp, follows_break)
+        entry = HistoryEntry(self._count, reading, timestamp, follows_break, setup, taken_at)
         self._entries.append(entry)
         if len(self._entries) > self._length:
             self._entries.popleft()

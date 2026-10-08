@@ -15,7 +15,8 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 
 from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
@@ -39,6 +40,10 @@ _DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
 DEFAULT_ERROR_CHECK_INTERVAL_S = 5.0
 
 
+def _local_now() -> datetime:
+    return datetime.now().astimezone()
+
+
 @dataclass(frozen=True)
 class Connected:
     """The Meter answered `*IDN?` as a 34401A. `setup` is what it was already doing, read back unchanged."""
@@ -57,11 +62,16 @@ class ConnectionFailed:
 
 @dataclass(frozen=True)
 class ReadingTaken:
-    """One Reading arrived. `timestamp` is `time.monotonic()` when it did, `setup` what it was taken under."""
+    """One Reading arrived.
+
+    `timestamp` is `time.monotonic()` when it did, for measuring intervals; `taken_at` is the wall-clock time then
+    (with its UTC offset), for people and CSV files. `setup` is what it was taken under.
+    """
 
     reading: Reading
     timestamp: float
     setup: Setup
+    taken_at: datetime = field(default_factory=_local_now)
 
 
 @dataclass(frozen=True)
@@ -262,7 +272,7 @@ class Worker:
     """Owns the Connection on its own thread and reports through `events`.
 
     While Continuous runs, the Worker looks at the Meter's status byte every `error_check_interval_s` seconds and
-    drains the error queue only if it says there is something in it (ADR-0005). `clock` is replaceable for tests.
+    drains the error queue only if it says there is something in it (ADR-0005). `clock` (monotonic seconds) and `wall_clock` (the time stamped on each Reading) are replaceable for tests.
     """
 
     def __init__(
@@ -272,11 +282,13 @@ class Worker:
         *,
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = _local_now,
     ) -> None:
         self._first_connection = open_transport
         self._events = events
         self.error_check_interval_s = error_check_interval_s
         self._clock = clock
+        self._wall_clock = wall_clock
         self._next_error_check = 0.0
         self._requests: queue.Queue[_Request] = queue.Queue()
         self._thread = threading.Thread(target=self._main, name="agilent34401a-worker", daemon=True)
@@ -477,7 +489,7 @@ class Worker:
             self._events.put(ReadingFailed(str(error)))
             transport.clear()
             return
-        self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup))
+        self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup, self._wall_clock()))
 
     def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:
         try:

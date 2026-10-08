@@ -39,3 +39,11 @@ class InvalidSetupError(ValueError):
 
 class CalibrationBlockedError(ValueError):
     """A raw command would change the Meter's calibration, which is refused unless explicitly allowed (ADR-0006)."""
+
+
+class BurstTooLargeError(InvalidSetupError):
+    """A Burst would take more Readings than Reading Memory holds, so it is refused before anything is sent."""
+
+
+class BurstRefusedError(MeterError):
+    """The Meter would not start a Burst; the message is what its error queue said."""

@@ -23,6 +23,7 @@ from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
 from agilent34401a.gui.system_tab import SystemTab
 from agilent34401a.gui.themes import ERROR_STYLE, Palette, apply_theme, style_menu
+from agilent34401a.gui.trigger_tab import install_trigger
 from agilent34401a.meter import (
     NPLC_VALUES,
     Function,
@@ -266,6 +267,7 @@ class MainWindow:
         self.recording = install_recording(self)
         self.sense_tab = SenseTab(self.notebook, self._request)
         self.add_tab("Sense", self.sense_tab.frame)
+        self.trigger_tab = install_trigger(self)
         self._add_system_tab()
         # The console holds the Worker, not the window: a reference cycle through the window would leave Tk variables
         # to be freed by whichever thread the garbage collector happens to run on.
@@ -401,6 +403,7 @@ class MainWindow:
         for index, function in enumerate(Function, start=1):
             self.register_shortcut(f"F{index}", f"Select {function.label}", partial(self._on_function, function))
         self.register_shortcut("R", "Run or pause Continuous Readings", self._shortcut_run)
+        self.register_shortcut("Space", "Take a single Reading", self.trigger_tab.single)
         for sequence, description in _PLANNED_SHORTCUTS:
             self.shortcuts.plan(sequence, description)
         self.register_shortcut("Ctrl+K", "Open the SCPI console", partial(self.show_tab, CONSOLE_TITLE))
@@ -636,6 +639,11 @@ class MainWindow:
         if not running:
             self._rate.reset()
             self.status_rate.configure(text="")
+
+    def pause_continuous(self) -> None:
+        """Pause Continuous Readings if they are running (Single and a Burst do, so that nothing else uses the Meter)."""
+        if self._running:
+            self._set_running(running=False)
 
     def _begin_change(self) -> None:
         """Lock the controls until the Worker reports the Setup the Meter ended up in."""

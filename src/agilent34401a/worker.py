@@ -1,7 +1,8 @@
 """The single thread that ever touches the Meter's Transport (ADR-0002).
 
 The GUI and CLI never call into the Transport or Driver themselves. They send the Worker requests
-(`connect`, `start_continuous`, `pause`, `apply_setup`, `disconnect`, `shutdown`) and learn what happened from the
+(`connect`, `start_continuous`, `pause`, `single`, `start_burst`, `cancel_burst`, `apply_setup`, `disconnect`,
+`shutdown`) and learn what happened from the
 events it puts on the queue it was given, which Tk drains with `after()`.
 
 One Worker serves one Connection at a time but many in turn: `connect` opens one, `disconnect` (or a lost Connection)
@@ -13,13 +14,17 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 
+from agilent34401a.burst import Burst, plan_burst, reading_offsets
 from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
 from agilent34401a.errors import (
+    BurstRefusedError,
+    BurstTooLargeError,
     CalibrationBlockedError,
     MalformedReplyError,
     MeterError,
@@ -29,7 +34,8 @@ from agilent34401a.errors import (
 )
 from agilent34401a.meter import Function, Reading, Setup, Terminals, reading_timeout
 from agilent34401a.resync import Sentinel, resynchronise
-from agilent34401a.transport import LocalControl, RemoteControl, Transport
+from agilent34401a.transport import LocalControl, RemoteControl, Transport, supports_device_clear
+from agilent34401a.trigger import TriggerSettings, TriggerSource
 
 _LOG = logging.getLogger(__name__)
 
@@ -39,6 +45,7 @@ _MAX_PENDING_EVENTS = 100
 _BACKOFF_S = 0.01
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
 DEFAULT_ERROR_CHECK_INTERVAL_S = 5.0
+DEFAULT_BURST_POLL_INTERVAL_S = 0.05
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 
 
@@ -53,6 +60,8 @@ class Connected:
     identity: Identity
     setup: Setup
     terminals: Terminals = Terminals.FRONT
+    supports_device_clear: bool = True
+    """Whether the Connection can send the device clear that cancels a wait for an external trigger."""
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,47 @@ class ReadingTaken:
     timestamp: float
     setup: Setup
     taken_at: datetime = field(default_factory=_local_now)
+
+
+@dataclass(frozen=True)
+class BurstStarted:
+    """The Meter was told to take a Burst of `expected_readings` Readings. `waits_for_trigger` means external."""
+
+    trigger: TriggerSettings
+    expected_readings: int
+    waits_for_trigger: bool
+
+
+@dataclass(frozen=True)
+class BurstProgressed:
+    """`points` of the `expected_readings` are in Reading Memory (reported when the number changes)."""
+
+    points: int
+    expected_readings: int
+
+
+@dataclass(frozen=True)
+class BurstFinished:
+    """The Burst is complete and its Readings were collected from Reading Memory.
+
+    Each of `readings` was also reported as a `ReadingTaken`, just before this event, stamped from the start of the
+    Burst because the Meter keeps no time stamps. `trigger` is what the Burst was asked for.
+    """
+
+    readings: tuple["ReadingTaken", ...]
+    trigger: TriggerSettings
+
+
+@dataclass(frozen=True)
+class BurstCancelled:
+    """A Burst was abandoned on request (or because the Connection was closing); the Meter was sent a device clear."""
+
+
+@dataclass(frozen=True)
+class BurstFailed:
+    """A Burst could not be started or completed. The Meter's trigger settings were put back if that was possible."""
+
+    message: str
 
 
 @dataclass(frozen=True)
@@ -196,6 +246,11 @@ Event = (
     Connected
     | ConnectionFailed
     | ReadingTaken
+    | BurstStarted
+    | BurstProgressed
+    | BurstFinished
+    | BurstCancelled
+    | BurstFailed
     | SetupChanged
     | TerminalsChanged
     | ErrorsReported
@@ -222,6 +277,21 @@ class _Run:
 
 @dataclass(frozen=True)
 class _Pause:
+    pass
+
+
+@dataclass(frozen=True)
+class _Single:
+    pass
+
+
+@dataclass(frozen=True)
+class _StartBurst:
+    trigger: TriggerSettings
+
+
+@dataclass(frozen=True)
+class _CancelBurst:
     pass
 
 
@@ -267,7 +337,20 @@ class _System:
     then: Event | None = None  # reported last, once everything above has worked
 
 
-_Request = _Run | _Pause | _Shutdown | _Disconnect | _Connect | _Apply | _Select | _System | _Raw
+_Request = (
+    _Run
+    | _Pause
+    | _Single
+    | _StartBurst
+    | _CancelBurst
+    | _Shutdown
+    | _Disconnect
+    | _Connect
+    | _Apply
+    | _Select
+    | _System
+    | _Raw
+)
 
 
 class Worker:
@@ -290,6 +373,7 @@ class Worker:
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = _local_now,
+        burst_poll_interval_s: float = DEFAULT_BURST_POLL_INTERVAL_S,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
         reading_timeout: Callable[[Setup], float] = reading_timeout,
     ) -> None:
@@ -298,6 +382,8 @@ class Worker:
         self.error_check_interval_s = error_check_interval_s
         self._clock = clock
         self._wall_clock = wall_clock
+        self.burst_poll_interval_s = burst_poll_interval_s
+        self._deferred: deque[_Request] = deque()  # requests that arrived while a Burst was being waited for
         self._max_consecutive_failures = max_consecutive_failures
         self._timeout_for = reading_timeout
         self._sentinel: Sentinel | None = None
@@ -327,6 +413,23 @@ class Worker:
     def pause(self) -> None:
         """Stop Continuous once the Reading in progress has finished."""
         self._requests.put(_Pause())
+
+    def single(self) -> None:
+        """Take exactly one Reading, with the Meter set to one immediately triggered Reading (ignored during Continuous)."""
+        self._requests.put(_Single())
+
+    def start_burst(self, trigger: TriggerSettings) -> None:
+        """Have the Meter take a Burst into Reading Memory and collect it; progress and the result arrive as events.
+
+        Continuous is paused. Raises `BurstTooLargeError`, before anything is sent, if the Burst would take more
+        Readings than Reading Memory holds. The Meter's trigger settings are put back when the Burst ends.
+        """
+        trigger.check_fits_reading_memory()
+        self._requests.put(_StartBurst(trigger))
+
+    def cancel_burst(self) -> None:
+        """Abandon the Burst being waited for with a device clear. Does nothing when no Burst is running."""
+        self._requests.put(_CancelBurst())
 
     def apply_setup(self, setup: Setup) -> None:
         """Send `setup` to the Meter, then report the Setup it is actually in and any errors it queued."""
@@ -440,7 +543,8 @@ class Worker:
             except MeterError as error:
                 self._events.put(ConnectionFailed(str(error)))
                 return None
-            self._events.put(Connected(identity, setup, terminals))
+            self._deferred.clear()
+            self._events.put(Connected(identity, setup, terminals, supports_device_clear(transport)))
             try:
                 ended_by = self._serve(driver, transport)
             except TransportError as error:
@@ -468,7 +572,7 @@ class Worker:
         except Exception:  # noqa: BLE001 - nothing more can be done with a Transport that will not close
             _LOG.warning("Could not close the Transport", exc_info=True)
 
-    def _serve(self, driver: Driver, transport: Transport) -> _Request:
+    def _serve(self, driver: Driver, transport: Transport) -> _Request:  # noqa: C901 - a case per kind of request
         """Serve requests until one ends the Connection, and return it."""
         running = False
         while True:
@@ -483,17 +587,29 @@ class Worker:
                     running = True
                 case _Pause():
                     running = False
-                case _System():
-                    self._administer(driver, transport, request)
-                case _Apply() | _Select() | _Raw():
+                case _Single():
+                    if not running:
+                        self._take_reading(driver, transport)
+                    continue
+                case _StartBurst(trigger):
+                    running = False
+                    ended = self._run_burst(driver, transport, trigger)
+                    if ended is not None:
+                        return ended
+                    continue
+                case _CancelBurst():
+                    pass  # no Burst is being waited for
+                case _System() | _Apply() | _Select() | _Raw():
                     self._serve_command(driver, transport, request)
             if not running or (congested and request is None):
                 continue  # paused, or waiting for the consumer to catch up
             self._take_reading(driver, transport)
             self._check_errors_if_due(driver, transport)
 
-    def _serve_command(self, driver: Driver, transport: Transport, request: _Apply | _Select | _Raw) -> None:
+    def _serve_command(self, driver: Driver, transport: Transport, request: _System | _Apply | _Select | _Raw) -> None:
         match request:
+            case _System():
+                self._administer(driver, transport, request)
             case _Apply(setup):
                 self._change_setup(driver, transport, partial(driver.apply, setup))
             case _Select(function):
@@ -502,6 +618,8 @@ class Worker:
                 self._send_raw(driver, transport, command, allow_calibration=allow_calibration)
 
     def _next_request(self, *, running: bool, congested: bool) -> _Request | None:
+        if self._deferred:
+            return self._deferred.popleft()
         if not running:
             return self._requests.get()
         try:
@@ -519,6 +637,104 @@ class Worker:
             return
         self._failures = 0
         self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup, self._wall_clock()))
+
+    def _run_burst(self, driver: Driver, transport: Transport, trigger: TriggerSettings) -> _Request | None:
+        """Run one Burst from start to collection; return the request that ended the Connection meanwhile, if any."""
+        if trigger.source is TriggerSource.EXTERNAL and not supports_device_clear(transport):
+            message = (
+                "This Connection cannot send a device clear, so a wait for an external trigger could not be cancelled"
+            )
+            self._events.put(BurstFailed(message))
+            return None
+        try:
+            burst = driver.start_burst(trigger)
+        except (BurstTooLargeError, BurstRefusedError) as error:
+            self._events.put(BurstFailed(str(error)))
+            return None
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            _LOG.warning("Could not start a Burst, resynchronising the Connection: %s", error)
+            transport.clear()
+            self._events.put(BurstFailed(f"The Burst could not be started: {error}"))
+            return None
+        self._events.put(BurstStarted(trigger, burst.expected_readings, trigger.source is TriggerSource.EXTERNAL))
+        started_at, wall_started_at = time.monotonic(), self._wall_clock()
+        cancelled, ended, failure, readings = self._complete_burst(driver, burst)
+        if cancelled or failure is not None:
+            transport.clear()  # a device clear: the Meter stops waiting for triggers and returns to idle
+        errors = self._finish_burst(driver, transport, burst)
+        if cancelled:
+            self._events.put(BurstCancelled())
+        elif failure is not None:
+            self._events.put(BurstFailed(f"The Burst failed: {failure}"))
+        else:
+            self._report_burst(burst, readings, started_at, wall_started_at)
+        if errors:
+            self._events.put(ErrorsReported(tuple(errors)))
+        return ended
+
+    def _complete_burst(self, driver: Driver, burst: Burst) -> tuple[bool, _Request | None, str | None, list[Reading]]:
+        """Wait for the Burst and fetch it; return whether it was cancelled, by which request, why it failed, and what it took."""
+        try:
+            plan = plan_burst(burst.setup)
+            if plan.polls:
+                cancelled, ended = self._poll_burst(driver, burst, plan.timeout_s)
+            else:
+                driver.wait_for_burst(burst, timeout=plan.timeout_s)
+                cancelled, ended = False, None
+            return cancelled, ended, None, [] if cancelled else driver.fetch_burst(burst)
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            _LOG.warning("A Burst failed, resynchronising the Connection: %s", error)
+            return False, None, str(error), []
+
+    def _report_burst(
+        self, burst: Burst, readings: list[Reading], started_at: float, wall_started_at: datetime
+    ) -> None:
+        """Report the Readings of a Burst one by one, stamped from its start, and then that it has finished."""
+        offsets = reading_offsets(burst.setup, len(readings))
+        taken = tuple(
+            ReadingTaken(reading, started_at + offset, burst.setup, wall_started_at + timedelta(seconds=offset))
+            for reading, offset in zip(readings, offsets, strict=True)
+        )
+        for event in taken:
+            self._events.put(event)
+        self._events.put(BurstFinished(taken, burst.trigger))
+
+    def _poll_burst(self, driver: Driver, burst: Burst, timeout_s: float | None) -> tuple[bool, _Request | None]:
+        """Look at the status byte until the Burst completes; return whether it was cancelled and by which request."""
+        deadline = None if timeout_s is None else self._clock() + timeout_s
+        reported = 0
+        while True:
+            progress = driver.burst_progress(burst)
+            if progress.points != reported:
+                reported = progress.points
+                self._events.put(BurstProgressed(progress.points, burst.expected_readings))
+            if progress.complete:
+                return False, None
+            if deadline is not None and self._clock() > deadline:
+                message = f"The Burst did not complete within {timeout_s:g} s"
+                raise TransportTimeoutError(message)
+            try:
+                request = self._requests.get(timeout=self.burst_poll_interval_s)
+            except queue.Empty:
+                continue
+            match request:
+                case _CancelBurst():
+                    return True, None
+                case _Shutdown() | _Disconnect() | _Connect():
+                    return True, request
+                case _:
+                    self._deferred.append(request)  # served once the Burst is over
+
+    def _finish_burst(self, driver: Driver, transport: Transport, burst: Burst) -> list[QueuedError]:
+        """Put the Meter's trigger settings back after a Burst, however it ended; its errors are returned."""
+        try:
+            errors = driver.finish_burst(burst)
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            _LOG.warning("Could not restore the trigger settings after a Burst: %s", error)
+            transport.clear()
+            return []
+        transport.timeout = reading_timeout(driver.setup)
+        return errors
 
     def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:
         try:

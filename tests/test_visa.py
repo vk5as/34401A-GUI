@@ -490,3 +490,8 @@ def test_a_socket_resource_is_recognised_by_its_name(monkeypatch):
     transport.clear()
 
     assert opened.cleared == 0
+
+
+def test_a_transport_can_send_a_device_clear_unless_it_is_a_raw_socket():
+    assert VisaTransport(FakeResource(), FakeManager()).supports_device_clear
+    assert not VisaTransport(FakeResource(), FakeManager(), socket=True).supports_device_clear

@@ -56,3 +56,11 @@ class BusLockout(Protocol):
 
     def set_local_lockout(self, *, locked: bool) -> bool:
         """Lock the front panel's Local key (or release that lock); return False if this Connection cannot."""
+
+
+def supports_device_clear(transport: Transport) -> bool:
+    """Whether `transport.clear()` really abandons what the Meter is doing, as a wait for an external trigger needs.
+
+    A Transport that cannot, such as a raw socket, says so with a false `supports_device_clear`; the rest can.
+    """
+    return bool(getattr(transport, "supports_device_clear", True))

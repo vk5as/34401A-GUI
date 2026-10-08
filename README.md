@@ -96,6 +96,23 @@ the effects are `slow`, `drop`, `reset`, `noise`, `truncated`, `unterminated` an
 agilent34401a-sim --port 5025 --fault slow:delay=3,command=READ --fault drop:after=50
 ```
 
+## Single and Burst
+
+**Single** (the button next to Run, or the Space key) takes exactly one Reading and pauses Continuous. The
+**Trigger** tab sets up a **Burst**: the Trigger Source (immediate, bus or external), the Trigger Delay (automatic, or
+fixed from 0 to 3600 s), the Sample Count and the Trigger Count. Start Burst has the Meter take that many Readings into
+its Reading Memory on its own and then collects them; they appear in the readout, the chart and the History, and
+File → Export Burst as CSV… saves them (the Meter keeps no time stamps, so each Reading's time is worked out from the
+Setup).
+
+- Reading Memory holds 512 Readings, so a Burst of Sample Count x Trigger Count above 512 (or with an infinite
+  Trigger Count) is refused before anything is sent.
+- Bus triggers are sent by the application. An external trigger may never arrive, so the application polls the
+  Meter's status byte instead of waiting, and Cancel sends a device clear.
+- A Connection that cannot send a device clear (a raw TCP socket, such as the `agilent34401a-sim` server) cannot
+  cancel a wait for an external trigger, so the External source is disabled there, with a tooltip saying why.
+- The Meter's trigger settings are put back when the Burst ends, so Run and Single keep working.
+
 ## Development
 
 `tkinter` is a system package, not a PyPI one. On Debian/Ubuntu: `sudo apt install python3-tk xvfb`.

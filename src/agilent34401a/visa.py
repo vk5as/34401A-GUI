@@ -116,7 +116,13 @@ class VisaTransport:
     """A Transport over one open pyvisa resource. It owns the resource and its manager."""
 
     def __init__(
-        self, resource: _Resource, manager: _Manager, *, gpib: bool = False, serial: bool = False, socket: bool = False
+        self,
+        resource: _Resource,
+        manager: _Manager,
+        *,
+        gpib: bool = False,
+        serial: bool = False,
+        socket: bool = False,
     ) -> None:
         self._resource = resource
         self._manager = manager
@@ -134,6 +140,11 @@ class VisaTransport:
     @timeout.setter
     def timeout(self, seconds: float) -> None:
         self._resource.timeout = round(seconds * _MS_PER_S)
+
+    @property
+    def supports_device_clear(self) -> bool:
+        """Whether `clear` really abandons what the Meter is doing; a raw socket has no device clear to send."""
+        return not self._socket
 
     def write(self, command: str) -> None:
         self._require_open()

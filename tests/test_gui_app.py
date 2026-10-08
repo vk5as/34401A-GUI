@@ -941,7 +941,9 @@ def test_space_does_not_fire_a_shortcut_on_top_of_a_focused_button_pressing_itse
     window = make_window()
     pump(window, lambda: connected(window))
     calls = []
-    window.register_shortcut("Space", "Test", lambda: calls.append("space"))
+    {shortcut.sequence: shortcut for shortcut in window.shortcuts.entries()}["Space"].handler = lambda: calls.append(
+        "space"
+    )
 
     press(window.run_button, "Key-space")
     press(window.root, "Key-space")
@@ -982,8 +984,8 @@ def test_help_shortcuts_lists_every_shortcut_marking_the_planned_ones(make_windo
     assert listed["F2"][0] == "Select AC V"
     assert listed["R"][1] == ""
     assert listed["Ctrl+L"] == ("Start or stop recording", "")
-    for planned in ("Space", "Ctrl+,"):
-        assert "planned" in listed[planned][1]
+    assert listed["Space"] == ("Take a single Reading", "")
+    assert "planned" in listed["Ctrl+,"][1]
 
 
 def test_a_planned_shortcut_is_listed_as_available_once_a_feature_registers_it(make_window):

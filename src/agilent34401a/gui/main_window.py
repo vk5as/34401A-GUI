@@ -149,7 +149,7 @@ class MainWindow:
         self.connection_dialog: ConnectionDialog | None = None
         self._resource = resource
         self._events: queue.Queue[Event] = queue.Queue()
-        self._worker = Worker(None, self._events, error_check_interval_s=self.settings.error_check_interval_s)
+        self._worker = self._new_worker()
         self._has_connection = False  # the Worker has been asked to connect and has not yet said `Disconnected`
         self._retiring = False  # the Worker has been asked to return the Meter to Local and close
         self._next: _Connection | None = None  # what to connect to once the Worker has finished
@@ -537,6 +537,9 @@ class MainWindow:
         self._end("Disconnecting…")
         self._worker.disconnect()
 
+    def _new_worker(self) -> Worker:
+        return Worker(None, self._events, error_check_interval_s=self.settings.error_check_interval_s)
+
     def _launch(self) -> None:
         """Start a Worker for the Connection that is waiting, with the window cleared of the previous one."""
         connection, self._next = self._next, None
@@ -554,6 +557,9 @@ class MainWindow:
         self._clear_display()
         self.status_connection.configure(text="Connecting…")
         self._has_connection = True
+        if not self._worker.is_alive():  # its thread ended after reporting `WorkerFailed`, so serve this one afresh
+            self._worker = self._new_worker()
+            self._worker.start()
         self._worker.connect(connection.open_transport)
         self._update_connection_menu()
 

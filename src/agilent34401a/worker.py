@@ -14,7 +14,6 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 
@@ -23,10 +22,12 @@ from agilent34401a.errors import (
     CalibrationBlockedError,
     MalformedReplyError,
     MeterError,
+    RepeatedFailureError,
     TransportError,
     TransportTimeoutError,
 )
 from agilent34401a.meter import Function, Reading, Setup, Terminals, reading_timeout
+from agilent34401a.resync import Sentinel, resynchronise
 from agilent34401a.transport import LocalControl, Transport
 
 _LOG = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ _MAX_PENDING_EVENTS = 100
 _BACKOFF_S = 0.01
 _DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
 DEFAULT_ERROR_CHECK_INTERVAL_S = 5.0
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 
 
 @dataclass(frozen=True)
@@ -263,20 +265,30 @@ class Worker:
 
     While Continuous runs, the Worker looks at the Meter's status byte every `error_check_interval_s` seconds and
     drains the error queue only if it says there is something in it (ADR-0005). `clock` is replaceable for tests.
+
+    A reply that is lost or garbled is reported and the Connection resynchronised (see `resync`); after
+    `max_consecutive_failures` of those in a row, or as soon as the Meter does not answer the resynchronisation at all,
+    the Connection is reported lost. `reading_timeout` says how long to wait for a Reading in a Setup.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - the options are what tests replace
         self,
         open_transport: Callable[[], Transport] | None,
         events: "queue.Queue[Event]",
         *,
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
+        max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        reading_timeout: Callable[[Setup], float] = reading_timeout,
     ) -> None:
         self._first_connection = open_transport
         self._events = events
         self.error_check_interval_s = error_check_interval_s
         self._clock = clock
+        self._max_consecutive_failures = max_consecutive_failures
+        self._timeout_for = reading_timeout
+        self._sentinel: Sentinel | None = None
+        self._failures = 0  # replies lost or garbled since the last good one
         self._next_error_check = 0.0
         self._requests: queue.Queue[_Request] = queue.Queue()
         self._thread = threading.Thread(target=self._main, name="agilent34401a-worker", daemon=True)
@@ -374,6 +386,15 @@ class Worker:
         return not self._thread.is_alive()
 
     def _main(self) -> None:
+        """Run the Worker's thread; whatever goes wrong in it is reported, never left to end the thread silently."""
+        try:
+            self._wait_for_connections()
+        except Exception as error:  # noqa: BLE001 - a bug here must still reach the UI
+            _LOG.exception("The Worker's thread failed")
+            self._events.put(WorkerFailed(f"{type(error).__name__}: {error}"))
+            self._events.put(Disconnected())
+
+    def _wait_for_connections(self) -> None:
         """Wait for a Connection to open, serve it, and go back to waiting, until asked to exit."""
         request: _Request | None = None
         while True:
@@ -396,9 +417,11 @@ class Worker:
                 transport = open_transport()
                 driver = Driver(transport)
                 identity = driver.identify()
+                self._sentinel = Sentinel("*IDN?", identity.raw)
+                self._failures = 0
                 setup = driver.read_setup()
                 terminals = driver.read_terminals()
-                transport.timeout = reading_timeout(setup)
+                transport.timeout = self._timeout_for(setup)
             except MeterError as error:
                 self._events.put(ConnectionFailed(str(error)))
                 return None
@@ -420,11 +443,15 @@ class Worker:
     @staticmethod
     def _release(transport: Transport) -> None:
         """Give the Meter back to its front panel (ADR-0004), then close the Transport. Neither may fail the exit."""
-        with suppress(MeterError):
+        try:
             if isinstance(transport, LocalControl):
                 transport.go_to_local()
-        with suppress(MeterError):
+        except Exception:  # noqa: BLE001 - closing matters more than why going to Local failed
+            _LOG.warning("Could not return the Meter to Local", exc_info=True)
+        try:
             transport.close()
+        except Exception:  # noqa: BLE001 - nothing more can be done with a Transport that will not close
+            _LOG.warning("Could not close the Transport", exc_info=True)
 
     def _serve(self, driver: Driver, transport: Transport) -> _Request:
         """Serve requests until one ends the Connection, and return it."""
@@ -473,8 +500,9 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Lost a Reading, resynchronising the Connection: %s", error)
             self._events.put(ReadingFailed(str(error)))
-            transport.clear()
+            self._recover(transport, error)
             return
+        self._failures = 0
         self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup))
 
     def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:
@@ -489,21 +517,38 @@ class Worker:
             return
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("A raw command failed, resynchronising the Connection: %s", error)
-            transport.clear()
+            self._recover(transport, error)
             self._events.put(RawFailed(command, str(error), self._drain_after_failure(driver, transport)))
             return
+        self._failures = 0
         self._events.put(RawReplied(command, result.reply, result.errors))
         if result.changes_meter:  # it may have changed the Setup behind the application's back
             self._change_setup(driver, transport, list)
 
-    @staticmethod
-    def _drain_after_failure(driver: Driver, transport: Transport) -> tuple[QueuedError, ...]:
+    def _drain_after_failure(self, driver: Driver, transport: Transport) -> tuple[QueuedError, ...]:
         """Empty the error queue of a Meter that did not answer, so its complaint is not blamed on a later command."""
         try:
             return tuple(driver.drain_errors())
-        except (MalformedReplyError, TransportTimeoutError):
-            transport.clear()
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            self._recover(transport, error, count=False)
             return ()
+
+    def _recover(self, transport: Transport, error: Exception, *, count: bool = True) -> None:
+        """Put the Connection back in step after `error`, or raise a `TransportError` if it cannot be saved.
+
+        That is the case when the Meter does not answer the resynchronisation (it is gone, or silent: pyvisa-py cannot
+        tell a dropped TCP connection from a Meter that says nothing), and when `count` failures in a row have
+        reached the limit, however well each resynchronisation went.
+        """
+        if count:
+            self._failures += 1
+            if self._failures >= self._max_consecutive_failures:
+                message = f"{self._failures} replies in a row were lost or garbled, the last: {error}"
+                raise RepeatedFailureError(message) from error
+        if self._sentinel is None:
+            transport.clear()
+        else:
+            resynchronise(transport, self._sentinel)
 
     def _change_setup(self, driver: Driver, transport: Transport, change: Callable[[], list[QueuedError]]) -> None:
         """Make a change to the Meter's Setup, then report the Setup it ended up in and any errors it queued."""
@@ -515,9 +560,10 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not change the Setup, resynchronising the Connection: %s", error)
             self._events.put(SetupFailed(str(error)))
-            transport.clear()
+            self._recover(transport, error)
             return
-        transport.timeout = reading_timeout(actual)
+        self._failures = 0
+        transport.timeout = self._timeout_for(actual)
         self._events.put(SetupChanged(actual))
         if terminals is not before:
             self._events.put(TerminalsChanged(terminals))
@@ -536,8 +582,9 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not check the Meter for errors, resynchronising the Connection: %s", error)
             self._events.put(AdminFailed(f"Checking for errors failed: {error}"))
-            transport.clear()
+            self._recover(transport, error)
             return
+        self._failures = 0
         if errors:
             _LOG.warning("The Meter queued errors: %s", errors)
             self._events.put(ErrorsReported(tuple(errors)))
@@ -548,7 +595,7 @@ class Worker:
             events = request.act(driver)
             if request.setup_follows:
                 actual = driver.read_setup()
-                transport.timeout = reading_timeout(actual)
+                transport.timeout = self._timeout_for(actual)
                 events.append(SetupChanged(actual))
             if request.then is not None:
                 events.append(request.then)
@@ -557,8 +604,9 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError, ValueError) as error:
             _LOG.warning("%s failed, resynchronising the Connection: %s", request.what, error)
             self._events.put(AdminFailed(f"{request.what} failed: {error}"))
-            transport.clear()
+            self._recover(transport, error)
             return
+        self._failures = 0
         for event in events:
             self._events.put(event)
 

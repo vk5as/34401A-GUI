@@ -17,6 +17,10 @@ class ResyncFailedError(TransportError):
     """The Meter did not answer when the Connection was resynchronised, so it is not in step and cannot be brought back."""
 
 
+class RepeatedFailureError(TransportError):
+    """Replies were lost or garbled too many times in a row for the Connection to be worth keeping."""
+
+
 class BackendUnavailableError(TransportError):
     """The VISA Backend asked for cannot be used, or no Backend can."""
 

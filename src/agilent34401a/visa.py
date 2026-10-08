@@ -13,7 +13,7 @@ from pyvisa.errors import VisaIOError
 from pyvisa.resources import MessageBasedResource, SerialInstrument
 
 from agilent34401a.backend import BackendStatus
-from agilent34401a.errors import BackendUnavailableError, TransportError, TransportTimeoutError
+from agilent34401a.errors import BackendUnavailableError, MalformedReplyError, TransportError, TransportTimeoutError
 from agilent34401a.serial_config import FlowControl, Parity, SerialSettings
 
 _DEFAULT_TIMEOUT_S = 2.0
@@ -22,6 +22,8 @@ _TERMINATION = "\n"
 _BREAK_S = 0.05
 _REMOTE = "SYST:REM"
 _LOCAL = "SYST:LOC"
+_DRAIN_TIMEOUT_S = 0.05  # how long a socket must stay quiet for `clear` to call it empty
+_MAX_DRAIN_READS = 100  # a socket that never stops talking is not cleared, but it is not waited for forever either
 _VENDOR_HINT = "Install Keysight IO Libraries Suite (or NI-VISA) to use this Backend."
 
 
@@ -120,14 +122,13 @@ class VisaTransport:
         *,
         gpib: bool = False,
         serial: bool = False,
-        device_clear: bool = True,
+        socket: bool = False,
     ) -> None:
         self._resource = resource
         self._manager = manager
         self._gpib = gpib
         self._serial = serial
-        self.supports_device_clear = device_clear
-        """Whether `clear` really abandons what the Meter is doing; a raw socket has no device clear to send."""
+        self._socket = socket
         self._closed = False
         self.timeout = _DEFAULT_TIMEOUT_S
 
@@ -140,6 +141,11 @@ class VisaTransport:
     def timeout(self, seconds: float) -> None:
         self._resource.timeout = round(seconds * _MS_PER_S)
 
+    @property
+    def supports_device_clear(self) -> bool:
+        """Whether `clear` really abandons what the Meter is doing; a raw socket has no device clear to send."""
+        return not self._socket
+
     def write(self, command: str) -> None:
         self._require_open()
         with _visa_errors():
@@ -148,7 +154,11 @@ class VisaTransport:
     def read(self) -> str:
         self._require_open()
         with _visa_errors():
-            return self._resource.read().rstrip("\r\n")
+            try:
+                return self._resource.read().rstrip("\r\n")
+            except UnicodeDecodeError as error:
+                message = f"The Meter's reply is not text: {error}"
+                raise MalformedReplyError(message) from error
 
     def query(self, command: str) -> str:
         self.write(command)
@@ -157,6 +167,9 @@ class VisaTransport:
     def clear(self) -> None:
         """Device clear: flush the buffers (GPIB: the bus message). RS-232 also sends a serial break."""
         self._require_open()
+        if self._socket:
+            self._drain()
+            return
         with _visa_errors():
             self._resource.clear()
             if self._serial:
@@ -177,6 +190,31 @@ class VisaTransport:
         self._require_open()
         if self._serial:
             self.write(_REMOTE)
+
+    def _drain(self) -> None:
+        """Read and throw away whatever a socket still has to say, until it has been quiet for a moment.
+
+        A socket has no device clear to send, and pyvisa-py's own `clear()` never returns once the other end has
+        closed the connection, so this stands in for it.
+        """
+        timeout = self._resource.timeout
+        self._resource.timeout = round(_DRAIN_TIMEOUT_S * _MS_PER_S)
+        try:
+            for _ in range(_MAX_DRAIN_READS):
+                if not self._discard_one_reply():
+                    return
+        finally:
+            self._resource.timeout = timeout
+
+    def _discard_one_reply(self) -> bool:
+        """Read one reply and drop it; False once nothing more arrives."""
+        try:
+            self.read()
+        except MalformedReplyError:
+            pass  # noise is still something to throw away
+        except TransportTimeoutError:
+            return False
+        return True
 
     def go_to_local(self) -> None:
         """Return the Meter to Local: GPIB addresses it with the REN line's go-to-local, RS-232 sends `SYST:LOC`.
@@ -278,13 +316,12 @@ def _open(
         message = f"Could not open {resource_name}: {error}"
         raise TransportError(message) from error
     return VisaTransport(
-        resource, manager, gpib=gpib, serial=serial is not None, device_clear=can_device_clear(resource_name)
+        resource,
+        manager,
+        gpib=gpib,
+        serial=serial is not None,
+        socket=resource_name.upper().endswith("::SOCKET"),
     )
-
-
-def can_device_clear(resource_name: str) -> bool:
-    """Whether a device clear can reach the Meter through `resource_name`: not through a raw socket."""
-    return not resource_name.upper().endswith("::SOCKET")
 
 
 def _configure_serial(resource: MessageBasedResource, resource_name: str, settings: SerialSettings) -> None:

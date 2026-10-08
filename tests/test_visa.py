@@ -5,8 +5,8 @@ import pytest
 from pyvisa import constants
 from pyvisa.errors import VisaIOError
 
-from agilent34401a.errors import BackendUnavailableError, TransportError, TransportTimeoutError
-from agilent34401a.visa import VisaTransport, can_device_clear, check_library, list_resources, open_visa_transport
+from agilent34401a.errors import BackendUnavailableError, MalformedReplyError, TransportError, TransportTimeoutError
+from agilent34401a.visa import VisaTransport, check_library, list_resources, open_visa_transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -432,20 +432,66 @@ def test_a_listing_that_fails_is_a_transport_error_and_still_releases_the_manage
     assert manager.closed == 1
 
 
-def test_a_transport_can_send_a_device_clear_unless_it_was_told_it_cannot():
+def test_a_reply_that_is_not_text_is_a_malformed_reply_not_a_crash():
+    transport, resource, _ = make()
+    resource.replies = [UnicodeDecodeError("ascii", b"\xe2", 0, 1, "ordinal not in range(128)")]
+
+    with pytest.raises(MalformedReplyError, match="text"):
+        transport.read()
+
+
+def test_clearing_a_socket_reads_what_is_left_over_instead_of_asking_pyvisa_py_to_clear():
+    # pyvisa-py's own clear() never returns on a socket the other end has closed.
+    resource, manager = FakeResource(), FakeManager()
+    transport = VisaTransport(resource, manager, socket=True)
+    transport.timeout = 1.5
+    resource.replies = [
+        "stale",
+        UnicodeDecodeError("ascii", b"\xe2", 0, 1, "ordinal not in range(128)"),
+        "more stale",
+        VisaIOError(constants.StatusCode.error_timeout),
+        "never reached",
+    ]
+
+    transport.clear()
+
+    assert resource.cleared == 0
+    assert resource.replies == ["never reached"]
+    assert transport.timeout == 1.5
+
+
+def test_clearing_a_socket_gives_up_on_a_reply_that_never_stops():
+    resource, manager = FakeResource(), FakeManager()
+    transport = VisaTransport(resource, manager, socket=True)
+    resource.replies = ["again"] * 10_000
+
+    transport.clear()
+
+    assert len(resource.replies) > 0
+
+
+def test_clearing_a_socket_reports_a_connection_that_failed():
+    resource, manager = FakeResource(), FakeManager()
+    transport = VisaTransport(resource, manager, socket=True)
+    resource.fail_on["read"] = VisaIOError(constants.StatusCode.error_connection_lost)
+
+    with pytest.raises(TransportError):
+        transport.clear()
+    assert transport.timeout == 2.0
+
+
+def test_a_socket_resource_is_recognised_by_its_name(monkeypatch):
+    opened = FakeResource()
+    _manager_opening(monkeypatch, lambda _name: opened)
+    monkeypatch.setattr("agilent34401a.visa.MessageBasedResource", FakeResource)
+
+    transport = open_visa_transport("@py", "TCPIP::127.0.0.1::5025::SOCKET")
+    opened.replies = [VisaIOError(constants.StatusCode.error_timeout)]
+    transport.clear()
+
+    assert opened.cleared == 0
+
+
+def test_a_transport_can_send_a_device_clear_unless_it_is_a_raw_socket():
     assert VisaTransport(FakeResource(), FakeManager()).supports_device_clear
-    assert not VisaTransport(FakeResource(), FakeManager(), device_clear=False).supports_device_clear
-
-
-@pytest.mark.parametrize(
-    ("resource_name", "expected"),
-    [
-        ("GPIB0::22::INSTR", True),
-        ("ASRL3::INSTR", True),
-        ("TCPIP0::192.168.0.5::inst0::INSTR", True),
-        ("TCPIP::127.0.0.1::5025::SOCKET", False),
-        ("tcpip0::10.0.0.2::5025::socket", False),
-    ],
-)
-def test_a_raw_socket_has_no_device_clear_but_the_other_resources_do(resource_name, expected):
-    assert can_device_clear(resource_name) is expected
+    assert not VisaTransport(FakeResource(), FakeManager(), socket=True).supports_device_clear

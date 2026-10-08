@@ -88,6 +88,14 @@ Linux caveat: pyserial does not implement DTR/DSR Flow Control in hardware on Li
 never waits for DSR. Windows implements it. On Linux, DTR/DSR therefore behaves like no Flow Control with DTR held
 asserted, so use a slower baud rate if characters are lost.
 
+The server can also misbehave on purpose, to see how a client copes. `--fault EFFECT[:OPTION=VALUE,...]` may be repeated;
+the effects are `slow`, `drop`, `reset`, `noise`, `truncated`, `unterminated` and `wrong-type`, and the options are
+`delay` (seconds), `command` (a regular expression), `after`, `every`, `times` and `seed`:
+
+```bash
+agilent34401a-sim --port 5025 --fault slow:delay=3,command=READ --fault drop:after=50
+```
+
 ## Single and Burst
 
 **Single** (the button next to Run, or the Space key) takes exactly one Reading and pauses Continuous. The

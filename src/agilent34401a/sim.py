@@ -21,6 +21,7 @@ from agilent34401a.meter import (
     Terminals,
     measurement_time,
 )
+from agilent34401a.sim_trigger import SimHost, TriggerModel
 
 HEWLETT_PACKARD_IDENTITY = "HEWLETT-PACKARD,34401A,0,10-5-2"
 AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
@@ -114,6 +115,13 @@ _LONG_FORMS = {
     "RWLOCK": "RWL",
     "LOCAL": "LOC",
     "REMOTE": "REM",
+    "TRIGGER": "TRIG",
+    "SOURCE": "SOUR",
+    "DELAY": "DEL",
+    "SAMPLE": "SAMP",
+    "INITIATE": "INIT",
+    "FETCH": "FETC",
+    "POINTS": "POIN",
 }
 
 # What `FUNC?` answers for each Function.
@@ -192,6 +200,7 @@ class Simulator:
         seed: int | None = None,
         random_source: random.Random | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
         calibration_count: int = 1,
         calibration_message: str = "",
     ) -> None:
@@ -224,6 +233,17 @@ class Simulator:
         self._errors: deque[str] = deque()
         # Each pending reply carries the real-time seconds the Meter needs before it can send it.
         self._replies: deque[tuple[str, float]] = deque()
+        self._trigger = TriggerModel(
+            SimHost(
+                setup=self._setup,
+                measure=lambda: self._measure(self._setup()),
+                skip=self._skip_signal,
+                error=self._errors.append,
+                reply=self._reply,
+                time_scale=lambda: self.time_scale,
+                clock=clock,
+            )
+        )
         self._reset()
 
     @property
@@ -236,6 +256,7 @@ class Simulator:
         self._signals[function] = signal if isinstance(signal, AppliedSignal) else AppliedSignal(signal)
 
     def _reset(self) -> None:
+        self._trigger.reset()
         self._function = Function.DC_VOLTAGE
         self.display_on = True
         self.display_text = ""
@@ -259,19 +280,18 @@ class Simulator:
         header = header.upper()
         argument = argument.strip()
         if header.startswith("*"):
-            self._common_command(header)
+            self._common_command(header, argument)
             return
         query = header.endswith("?")
         path = _mnemonics(header.removesuffix("?"))
         key = ":".join(path)
         if key == "SYST:ERR" and query:
             self._reply(self._errors.popleft() if self._errors else _NO_ERROR)
-        elif key == "READ" and query:
-            setup = self._setup()
-            self._reply(self._measure(setup), measurement_time(setup))
         elif key == "FUNC":
             self._function_command(query=query, argument=argument)
-        elif self._system_command(key, query=query, argument=argument):
+        elif self._system_command(key, query=query, argument=argument) or self._trigger.command(
+            key, query=query, argument=argument
+        ):
             pass
         elif not (
             self._setting_command(path, query=query, argument=argument)
@@ -279,16 +299,19 @@ class Simulator:
         ):
             self._errors.append(_UNDEFINED_HEADER)
 
-    def _common_command(self, header: str) -> None:
+    def _common_command(self, header: str, argument: str) -> None:
+        if self._trigger.common(header, argument):
+            return
         match header:
             case "*IDN?":
                 self._reply(self._identity)
             case "*CLS":
                 self._errors.clear()
+                self._trigger.clear_status()
             case "*RST":
                 self._reset()
             case "*STB?":
-                self._reply(str(_ERROR_QUEUE_STATUS_BIT if self._errors else 0))
+                self._reply(str((_ERROR_QUEUE_STATUS_BIT if self._errors else 0) | self._trigger.status_bits()))
             case "*TST?":
                 passed = self.self_test_passes
                 if not passed:
@@ -582,6 +605,14 @@ class Simulator:
     def clear(self) -> None:
         self._require_open()
         self._replies.clear()
+        self._trigger.abort()
+
+    def external_trigger(self) -> None:
+        """Pulse the Meter's external trigger input, as a test (or the equipment it is wired to) would."""
+        self._trigger.external_trigger()
+
+    def _skip_signal(self, seconds: float) -> None:
+        self._signal_time += seconds
 
     def go_to_local(self) -> None:
         self._require_open()

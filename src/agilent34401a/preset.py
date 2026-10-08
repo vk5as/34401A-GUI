@@ -6,7 +6,8 @@ A Preset is a named Setup. This module is the pure part: the JSON form of a Setu
 """
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, TypeVar, overload
 
@@ -18,7 +19,97 @@ from agilent34401a.trigger import TriggerSettings, TriggerSource
 FORMAT_VERSION = 1
 """The version of the JSON a Preset is written in. Raised only when an older reader could not read the new form."""
 
+FORMAT_NAME = "agilent34401a-presets"
+"""What a Presets file says it is, so that some other JSON file is recognised as not being one."""
+MAX_NAME_LENGTH = 60
+
 _E = TypeVar("_E", bound=Enum)
+
+
+@dataclass(frozen=True)
+class Preset:
+    """A named Setup. The name is how the user finds it; names are unique to the case within a store."""
+
+    name: str
+    setup: Setup
+
+
+@dataclass(frozen=True)
+class PresetFile:
+    """The Presets a file held, and what was wrong with the entries that could not be used."""
+
+    presets: tuple[Preset, ...]
+    problems: tuple[str, ...]
+
+
+def clean_name(name: str) -> str:
+    """Return `name` trimmed, or raise `PresetError` if a Preset cannot be called that."""
+    name = name.strip()
+    if not name:
+        message = "A Preset name cannot be empty"
+        raise PresetError(message)
+    if len(name) > MAX_NAME_LENGTH:
+        message = f"A Preset name is at most {MAX_NAME_LENGTH} characters, not {len(name)}"
+        raise PresetError(message)
+    if any(not character.isprintable() for character in name):
+        message = "A Preset name cannot contain line breaks, tabs or other control characters"
+        raise PresetError(message)
+    return name
+
+
+def presets_to_json(presets: Iterable[Preset]) -> dict[str, Any]:
+    """Return `presets` as the JSON document a Presets file holds."""
+    return {
+        "format": FORMAT_NAME,
+        "version": FORMAT_VERSION,
+        "presets": [{"name": preset.name, "setup": setup_to_json(preset.setup)} for preset in presets],
+    }
+
+
+def presets_from_json(data: object) -> PresetFile:
+    """Read a Presets document. A document that is not one, or is of a version this cannot read, is a `PresetError`.
+
+    A Preset in it that is wrong, or whose name an earlier one already has, is left out and described in `problems`,
+    so that one bad entry does not cost the user the rest.
+    """
+    if not isinstance(data, dict) or data.get("format") != FORMAT_NAME:
+        message = "This is not a Preset file"
+        raise PresetError(message)
+    version = data.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        message = f"The format version must be a whole number, not {version!r}"
+        raise PresetError(message)
+    if version != FORMAT_VERSION:
+        message = f"This Preset file is of format version {version}, but this program reads version {FORMAT_VERSION}"
+        raise PresetError(message)
+    entries = data.get("presets")
+    if not isinstance(entries, list):
+        message = "'presets' is missing or is not a list"
+        raise PresetError(message)
+    presets: list[Preset] = []
+    problems: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        label = f"Preset {index}"
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str) and entry["name"].strip():
+            label = f"Preset '{entry['name'].strip()}'"
+        try:
+            preset = _read_entry(entry)
+            if any(preset.name.casefold() == earlier.name.casefold() for earlier in presets):
+                message = f"There is already a Preset called '{preset.name}', so this one was left out"
+                raise PresetError(message)  # noqa: TRY301 - reported as this entry's problem just below
+            presets.append(preset)
+        except PresetError as error:
+            problems.append(f"{label}: {error}")
+    return PresetFile(tuple(presets), tuple(problems))
+
+
+def _read_entry(entry: object) -> Preset:
+    fields = _object(entry, "a Preset")
+    name = _get(fields, "name")
+    if not isinstance(name, str):
+        message = f"The Preset name must be text, not {name!r}"
+        raise PresetError(message)
+    return Preset(clean_name(name), setup_from_json(_get(fields, "setup")))
 
 
 def setup_to_json(setup: Setup) -> dict[str, Any]:

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from agilent34401a.meter import Setup
+from agilent34401a.meter import Setup, measurement_time, reading_timeout
 from agilent34401a.trigger import TriggerSettings, TriggerSource
 
 # The Meter's automatic Trigger Delay depends on the Function, Range and AC Filter (a few milliseconds, up to 1.5 s for
@@ -50,3 +50,47 @@ class BurstProgress:
 
     points: int
     complete: bool
+
+
+BLOCKING_LIMIT_S = 5.0
+"""A Burst expected to take longer than this is polled, so that it can be cancelled, rather than waited for."""
+_TIMEOUT_MARGIN = 1.5
+
+
+@dataclass(frozen=True)
+class BurstPlan:
+    """How to run a Burst: how long it takes to measure, how long to wait for it, and whether to poll."""
+
+    duration_s: float
+    """Seconds the Meter spends measuring, not counting any wait for a trigger."""
+    timeout_s: float | None
+    """Seconds after which a Burst that has not completed has failed, or None when it may wait for ever."""
+    polls: bool
+    """Whether to poll the status byte (so the wait can be cancelled) instead of one blocking `*OPC?`."""
+
+
+def plan_burst(setup: Setup) -> BurstPlan:
+    """Work out how to run a Burst under `setup`, whose trigger settings are the Burst's."""
+    trigger = setup.trigger
+    triggers = trigger.trigger_count or 1
+    duration = triggers * (trigger_delay_seconds(setup) + trigger.sample_count * measurement_time(setup))
+    timeout = None if trigger.source is TriggerSource.EXTERNAL else duration * _TIMEOUT_MARGIN + reading_timeout(setup)
+    several_bus_triggers = trigger.source is TriggerSource.BUS and triggers != 1
+    polls = trigger.source is TriggerSource.EXTERNAL or several_bus_triggers or duration > BLOCKING_LIMIT_S
+    return BurstPlan(duration, timeout, polls)
+
+
+def reading_offsets(setup: Setup, count: int) -> list[float]:
+    """Seconds after the Burst started at which each of its first `count` Readings was taken.
+
+    The Meter keeps no time stamps, so these come from the Setup: each trigger waits out the Trigger Delay and then
+    takes its Samples one after another. Triggers that arrive from outside are taken to follow one another at once.
+    """
+    trigger = setup.trigger
+    delay = trigger_delay_seconds(setup)
+    reading = measurement_time(setup)
+    samples = trigger.sample_count
+    return [
+        (index // samples) * (delay + samples * reading) + delay + (index % samples + 1) * reading
+        for index in range(count)
+    ]

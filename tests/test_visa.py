@@ -6,7 +6,7 @@ from pyvisa import constants
 from pyvisa.errors import VisaIOError
 
 from agilent34401a.errors import BackendUnavailableError, TransportError, TransportTimeoutError
-from agilent34401a.visa import VisaTransport, check_library, list_resources, open_visa_transport
+from agilent34401a.visa import VisaTransport, can_device_clear, check_library, list_resources, open_visa_transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -430,3 +430,22 @@ def test_a_listing_that_fails_is_a_transport_error_and_still_releases_the_manage
         list_resources("@py")
 
     assert manager.closed == 1
+
+
+def test_a_transport_can_send_a_device_clear_unless_it_was_told_it_cannot():
+    assert VisaTransport(FakeResource(), FakeManager()).supports_device_clear
+    assert not VisaTransport(FakeResource(), FakeManager(), device_clear=False).supports_device_clear
+
+
+@pytest.mark.parametrize(
+    ("resource_name", "expected"),
+    [
+        ("GPIB0::22::INSTR", True),
+        ("ASRL3::INSTR", True),
+        ("TCPIP0::192.168.0.5::inst0::INSTR", True),
+        ("TCPIP::127.0.0.1::5025::SOCKET", False),
+        ("tcpip0::10.0.0.2::5025::socket", False),
+    ],
+)
+def test_a_raw_socket_has_no_device_clear_but_the_other_resources_do(resource_name, expected):
+    assert can_device_clear(resource_name) is expected

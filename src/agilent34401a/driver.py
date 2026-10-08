@@ -306,7 +306,10 @@ class Driver:
         points = int(self._read_number("DATA:POIN?"))
         if burst.bus_trigger_due(points):
             self._send_bus_trigger(burst)
-        return BurstProgress(points, complete=bool(self.status_byte() & _EVENT_SUMMARY_STATUS_BIT))
+        complete = bool(self.status_byte() & _EVENT_SUMMARY_STATUS_BIT)
+        if complete:
+            points = int(self._read_number("DATA:POIN?"))  # the last Readings may have arrived since the first look
+        return BurstProgress(points, complete=complete)
 
     def _send_bus_trigger(self, burst: Burst) -> None:
         self._transport.write("*TRG")

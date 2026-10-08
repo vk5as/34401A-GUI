@@ -59,10 +59,14 @@ def _visa_errors() -> Iterator[None]:
 class VisaTransport:
     """A Transport over one open pyvisa resource. It owns the resource and its manager."""
 
-    def __init__(self, resource: _Resource, manager: _Manager, *, gpib: bool = False) -> None:
+    def __init__(
+        self, resource: _Resource, manager: _Manager, *, gpib: bool = False, device_clear: bool = True
+    ) -> None:
         self._resource = resource
         self._manager = manager
         self._gpib = gpib
+        self.supports_device_clear = device_clear
+        """Whether `clear` really abandons what the Meter is doing; a raw socket has no device clear to send."""
         self._closed = False
         self.timeout = _DEFAULT_TIMEOUT_S
 
@@ -176,7 +180,17 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
         _release(resource, manager)
         message = f"Could not open {resource_name}: {error}"
         raise TransportError(message) from error
-    return VisaTransport(resource, manager, gpib=resource_name.upper().startswith("GPIB"))
+    return VisaTransport(
+        resource,
+        manager,
+        gpib=resource_name.upper().startswith("GPIB"),
+        device_clear=can_device_clear(resource_name),
+    )
+
+
+def can_device_clear(resource_name: str) -> bool:
+    """Whether a device clear can reach the Meter through `resource_name`: not through a raw socket."""
+    return not resource_name.upper().endswith("::SOCKET")
 
 
 def list_resources(library: str) -> list[str]:

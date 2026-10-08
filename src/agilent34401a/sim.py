@@ -312,7 +312,7 @@ class Simulator:
             "SYST:BEEP": self._beep,
             "SYST:BEEP:STAT": lambda: self._switch_command("beeper_enabled", query=query, argument=argument),
             "SYST:RWL": lambda: setattr(self, "front_panel_locked", True),
-            "SYST:LOC": lambda: setattr(self, "front_panel_locked", False),
+            "SYST:LOC": self.go_to_local,  # the RS-232 way back to Local: front panel and Local key included
             "SYST:REM": lambda: None,
             "DISP": lambda: self._switch_command("display_on", query=query, argument=argument),
             "DISP:TEXT": lambda: self._display_text_command(query=query, argument=argument),

@@ -47,3 +47,7 @@ class BurstTooLargeError(InvalidSetupError):
 
 class BurstRefusedError(MeterError):
     """The Meter would not start a Burst; the message is what its error queue said."""
+
+
+class PresetError(Exception):
+    """A Preset could not be read, stored, found or written; the message says which Preset and why."""

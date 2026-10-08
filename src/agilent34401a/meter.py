@@ -1,10 +1,11 @@
 """The Meter model: Functions, Setups, Readings, and turning replies into Readings and Readings into text."""
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from agilent34401a.errors import InvalidSetupError, MalformedReplyError
+from agilent34401a.math_operations import LimitResult, MathOperation, MathSettings
 
 # Engineering prefixes by power of ten, smallest to largest.
 _PREFIXES = {-12: "p", -9: "n", -6: "µ", -3: "m", 0: "", 3: "k", 6: "M", 9: "G"}
@@ -227,6 +228,16 @@ class Function(Enum):
     def has_input_impedance(self) -> bool:
         return self._spec.has_input_impedance
 
+    @property
+    def has_math(self) -> bool:
+        """Math Operations apply to every Function but the continuity and diode tests."""
+        return self not in (Function.CONTINUITY, Function.DIODE)
+
+    @property
+    def has_decibels(self) -> bool:
+        """The dB and dBm Operations are voltage maths, so they apply to DC voltage and AC voltage only."""
+        return self in (Function.DC_VOLTAGE, Function.AC_VOLTAGE)
+
 
 _SPECS = {
     Function.DC_VOLTAGE: _FunctionSpec(
@@ -259,7 +270,7 @@ class Setup:
     Resolution always agrees with it. The same goes for `gate_time` of frequency and period. Each sense option is
     None for the Functions it does not apply to and set for the ones it does: `ac_filter` for AC Functions,
     `gate_time` for frequency and period, `autozero` for the Functions that integrate, and `input_impedance` for DC
-    voltage.
+    voltage. `math` holds the Math Operation in effect, if any, and the settings of them all.
     """
 
     function: Function
@@ -270,6 +281,7 @@ class Setup:
     gate_time: GateTime | None = None
     autozero: Autozero | None = None
     input_impedance: InputImpedance | None = None
+    math: MathSettings = field(default_factory=MathSettings)
 
     def __post_init__(self) -> None:
         function = self.function
@@ -285,6 +297,7 @@ class Setup:
             message = f"{function.label} has no Integration Time"
             raise InvalidSetupError(message)
         self._require_sense_options()
+        self._require_math_to_apply()
         expected = function.fixed_resolution
         if expected is None:
             expected = self.gate_time.resolution if self.gate_time else _RESOLUTION_FOR_NPLC.get(self.nplc or 0)
@@ -307,6 +320,17 @@ class Setup:
             if not applies and value is not None:
                 message = f"{function.label} has no {name}"
                 raise InvalidSetupError(message)
+
+    def _require_math_to_apply(self) -> None:
+        function, operation = self.function, self.math.operation
+        if operation is None:
+            return
+        if not function.has_math:
+            message = f"{function.label} has no Math Operation, not {operation.label}"
+            raise InvalidSetupError(message)
+        if operation.in_decibels and not function.has_decibels:
+            message = f"{operation.label} applies to DC V and AC V, not {function.label}"
+            raise InvalidSetupError(message)
 
     @classmethod
     def default(cls, function: Function) -> "Setup":
@@ -355,6 +379,10 @@ class Setup:
     def with_input_impedance(self, input_impedance: InputImpedance) -> "Setup":
         return replace(self, input_impedance=input_impedance)
 
+    def with_math(self, math_settings: MathSettings) -> "Setup":
+        """Choose the Math Operation in effect and the settings of them all. Only one Operation is active."""
+        return replace(self, math=math_settings)
+
 
 def describe_setup(setup: Setup) -> str:
     """One line for the readout: Function, Range, Resolution and Integration Time."""
@@ -373,7 +401,28 @@ def describe_setup(setup: Setup) -> str:
         parts.append(f"Autozero {setup.autozero.label.lower()}")
     if setup.input_impedance not in (None, InputImpedance.TEN_MEGOHM):
         parts.append(f"{setup.input_impedance.label} input")
+    if setup.math.operation is not None:
+        parts.append(describe_math(setup))
     return " · ".join(parts)
+
+
+def describe_math(setup: Setup) -> str:
+    """Say which Math Operation is in effect and what it uses: "Null 500 mV", "dBm into 600 Ω", "Limit Test -1 V to 2 V"."""
+    settings, unit = setup.math, setup.function.unit
+    match settings.operation:
+        case MathOperation.NULL:
+            return f"Null {_engineering(settings.null_offset, unit)}"
+        case MathOperation.DB:
+            return f"dB relative to {settings.db_reference:g} dBm"
+        case MathOperation.DBM:
+            return f"dBm into {settings.dbm_reference_resistance:g} Ω"
+        case MathOperation.LIMIT_TEST:
+            lower, upper = (_engineering(bound, unit) for bound in (settings.limit_lower, settings.limit_upper))
+            return f"Limit Test {lower} to {upper}"
+        case MathOperation.STATISTICS:
+            return MathOperation.STATISTICS.label
+        case None:
+            return ""
 
 
 def measurement_time(setup: Setup) -> float:
@@ -411,6 +460,19 @@ class Reading:
     value: float
     function: Function
     raw: str
+    math: MathOperation | None = None
+    """The Math Operation in effect when it was taken; for Null, dB and dBm `value` is the Operation's result."""
+    limit: LimitResult | None = None
+    """How it did in a Limit Test, or None when no Limit Test was running."""
+
+    @property
+    def unit(self) -> str:
+        """The unit of `value`: the Function's, or dB or dBm when the Meter was doing that maths."""
+        return self.math.label if self.math is not None and self.math.in_decibels else self.function.unit
+
+    @property
+    def uses_prefixes(self) -> bool:
+        return self.function.uses_prefixes and not (self.math is not None and self.math.in_decibels)
 
     @property
     def is_overload(self) -> bool:
@@ -439,22 +501,27 @@ def format_reading(reading: Reading, resolution: Resolution = Resolution.SIX_HAL
         return "OVLD"
     significant = resolution.significant_digits
     value = reading.value + 0.0  # -0.0 would otherwise print as "-0.000000"
-    if not reading.function.uses_prefixes:
-        return _scaled_text(value, 0, significant)
+    if not reading.uses_prefixes:
+        text = _scaled_text(value, 0, significant)
+        return f"{text} {reading.unit}" if reading.unit and reading.math is not None else text
     prefix_exponent = _prefix_exponent(value)
     text = _scaled_text(value, prefix_exponent, significant)
     if abs(float(text)) >= 10**_PREFIX_STEP and prefix_exponent < _MAX_PREFIX_EXPONENT:
         # Rounding carried into the next power of a thousand (999.99999 mV -> 1.000000 V).
         prefix_exponent += _PREFIX_STEP
         text = _scaled_text(value, prefix_exponent, significant)
-    return f"{text} {_PREFIXES[prefix_exponent]}{reading.function.unit}"
+    return f"{text} {_PREFIXES[prefix_exponent]}{reading.unit}"
 
 
 def format_range(function: Function, value: float) -> str:
     """Name a Range the way the Meter's front panel does: 100 mV, 10 kΩ, 3 A."""
+    return _engineering(value, function.range_unit)
+
+
+def _engineering(value: float, unit: str) -> str:
     prefix_exponent = _prefix_exponent(value)
     scaled = round(value / 10**prefix_exponent, 9)
-    return f"{scaled:g} {_PREFIXES[prefix_exponent]}{function.range_unit}"
+    return f"{scaled:g} {_PREFIXES[prefix_exponent]}{unit}".strip()
 
 
 def _prefix_exponent(value: float) -> int:

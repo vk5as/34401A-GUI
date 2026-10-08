@@ -1,8 +1,10 @@
 import math
+from dataclasses import replace
 
 import pytest
 
 from agilent34401a.history import History, Statistics
+from agilent34401a.math_operations import LimitResult, MathOperation
 from agilent34401a.meter import Function, Reading, parse_reading
 
 OVERLOAD = "+9.90000000E+37"
@@ -136,6 +138,35 @@ def test_changing_function_to_one_with_the_same_unit_still_breaks_the_history():
     history.add(reading(1.0, Function.AC_VOLTAGE), 1.0)
 
     assert [entry.sample for entry in history.break_markers()] == [2]
+
+
+def test_switching_to_dbm_or_back_breaks_the_history_because_the_unit_changed():
+    history = History(10)
+    history.add(reading(1.0), 0.0)
+    history.add(replace(reading(2.2), math=MathOperation.DBM), 1.0)
+    history.add(replace(reading(2.3), math=MathOperation.DBM), 2.0)
+    history.add(reading(1.0), 3.0)
+
+    assert [entry.sample for entry in history.break_markers()] == [2, 4]
+
+
+def test_switching_null_on_or_off_breaks_the_history_because_the_readings_no_longer_compare():
+    history = History(10)
+    history.add(reading(1.0), 0.0)
+    history.add(replace(reading(0.25), math=MathOperation.NULL), 1.0)
+    history.add(replace(reading(0.26), math=MathOperation.NULL), 2.0)
+    history.add(reading(1.0), 3.0)
+
+    assert [entry.sample for entry in history.break_markers()] == [2, 4]
+
+
+def test_statistics_and_limit_tests_leave_the_readings_comparable():
+    history = History(10)
+    history.add(reading(1.0), 0.0)
+    history.add(replace(reading(1.0), math=MathOperation.STATISTICS), 1.0)
+    history.add(replace(reading(1.0), math=MathOperation.LIMIT_TEST, limit=LimitResult.PASS), 2.0)
+
+    assert history.break_markers() == ()
 
 
 def test_each_change_of_function_gets_its_own_break_marker():

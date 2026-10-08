@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from agilent34401a.csv_log import COLUMNS, CsvWriter, LoggedReading, csv_row, limit_result_text, math_mode_text
+from agilent34401a.math_operations import LimitResult, MathOperation, MathSettings
 from agilent34401a.meter import Function, Reading, Setup, parse_reading
 
 AT = datetime(2026, 3, 4, 5, 6, 7, 891000, tzinfo=timezone(timedelta(hours=9, minutes=30)))
@@ -123,7 +124,7 @@ def test_a_time_without_a_zone_is_written_as_it_is():
     assert csv_row(logged(taken_at=naive))[0] == "2026-01-02T03:04:05.000"
 
 
-def test_math_mode_and_limit_result_are_empty_until_the_meter_is_doing_math():
+def test_math_mode_and_limit_result_are_empty_when_the_meter_is_not_doing_math():
     setup = Setup.default(Function.DC_VOLTAGE)
 
     assert math_mode_text(setup) == ""
@@ -131,6 +132,50 @@ def test_math_mode_and_limit_result_are_empty_until_the_meter_is_doing_math():
     row = csv_row(logged(setup=setup))
     assert row[COLUMNS.index("math_mode")] == ""
     assert row[COLUMNS.index("limit_result")] == ""
+
+
+@pytest.mark.parametrize(
+    ("operation", "text"),
+    [
+        (MathOperation.NULL, "NULL"),
+        (MathOperation.DB, "DB"),
+        (MathOperation.DBM, "DBM"),
+        (MathOperation.STATISTICS, "STATS"),
+        (MathOperation.LIMIT_TEST, "LIMIT"),
+    ],
+)
+def test_math_mode_names_the_math_operation_in_effect(operation, text):
+    setup = Setup.default(Function.DC_VOLTAGE).with_math(MathSettings(operation=operation))
+
+    assert math_mode_text(setup) == text
+    assert csv_row(logged(setup=setup))[COLUMNS.index("math_mode")] == text
+
+
+@pytest.mark.parametrize(
+    ("result", "text"), [(LimitResult.HIGH, "HI"), (LimitResult.LOW, "LO"), (LimitResult.PASS, "PASS"), (None, "")]
+)
+def test_limit_result_says_how_the_reading_did_in_the_limit_test(result, text):
+    taken = Reading(1.5, Function.DC_VOLTAGE, "+1.5E+00", math=MathOperation.LIMIT_TEST, limit=result)
+
+    assert limit_result_text(taken) == text
+    assert csv_row(logged(taken))[COLUMNS.index("limit_result")] == text
+
+
+def test_a_reading_in_dbm_has_the_unit_dbm_and_the_value_the_meter_gave():
+    taken = Reading(13.01, Function.DC_VOLTAGE, "+1.30100000E+01", math=MathOperation.DBM)
+    setup = Setup.default(Function.DC_VOLTAGE).with_math(MathSettings(operation=MathOperation.DBM))
+
+    row = csv_row(logged(taken, setup=setup))
+
+    assert row[COLUMNS.index("unit")] == "dBm"
+    assert row[COLUMNS.index("value")] == "13.01"
+    assert row[COLUMNS.index("math_mode")] == "DBM"
+
+
+def test_a_reading_that_names_its_math_operation_fills_math_mode_even_when_its_setup_is_not_known():
+    taken = Reading(0.75, Function.DC_VOLTAGE, "+7.5E-01", math=MathOperation.NULL)
+
+    assert csv_row(logged(taken))[COLUMNS.index("math_mode")] == "NULL"
 
 
 # --- the writer -------------------------------------------------------------------------------------------------

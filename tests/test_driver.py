@@ -323,7 +323,9 @@ def test_read_setup_rejects_a_function_it_does_not_know(reply):
 
 @pytest.mark.parametrize("reply", ['"VOLT"', "VOLT", '"volt"', '"VOLT:DC"', ' "VOLT"\r\n'])
 def test_read_setup_understands_the_forms_the_meter_may_name_dc_voltage_in(reply):
-    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01", "1", "0", "IMM", "1", "+1", "+1")).read_setup()
+    trigger_default = ("IMM", "1", "+1", "+1")  # TRIG:SOUR?, TRIG:DEL:AUTO?, SAMP:COUN? and TRIG:COUN?
+    math_off = ("0", "0", "0", "+6.00000000E+02", "0", "0")  # CALC:STAT? and the settings of the Math Operations
+    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01", "1", "0", *trigger_default, *math_off)).read_setup()
 
     assert setup.function is Function.DC_VOLTAGE
 

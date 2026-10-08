@@ -58,7 +58,7 @@ def test_raw_refuses_a_calibration_write_and_never_sends_it(monkeypatch, capsys,
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--allow-calibration" in captured.err
-    assert not any("CAL" in sent.upper() for sent in writes)
+    assert not any("CAL:" in sent.upper() for sent in writes)
     assert writes.count("*IDN?") == 1  # only the Meter's identification at connect, not a harmless part of the command
 
 

@@ -79,7 +79,7 @@ def test_driver_never_writes_to_the_meters_calibration():
     driver.unlock_front_panel()
 
     writes = [command for command in simulator.commands if not command.endswith("?")]
-    assert not [command for command in writes if command.upper().startswith("CAL")]
+    assert not [command for command in writes if command.upper().startswith("CAL:")]
     assert simulator.query("SYST:ERR?").startswith("+0")
 
 

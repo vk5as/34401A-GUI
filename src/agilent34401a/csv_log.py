@@ -4,12 +4,15 @@ The columns are `timestamp_iso, elapsed_s, function, range, value, unit, raw, ma
 
 - `timestamp_iso` is the wall-clock time the Reading was taken, ISO 8601 to the millisecond (with its UTC offset when
   the time has one); `elapsed_s` is the seconds since the Recording, log or History began.
-- `function` is the Function's label ("DC V"), `unit` its unit; `value` is in that unit, never scaled with a prefix.
+- `function` is the Function's label ("DC V"), `unit` its unit (dB or dBm under those Operations); `value` is in that unit,
+  never scaled with a prefix.
 - `range` is the Range as a plain number in the unit of the Function's input (volts for frequency), `auto` for
   Autorange, and empty for a Function with no Range choice or when the Setup is not known.
 - An Overload has `OVLD` for its value; `raw` always holds the Raw Reading exactly as the Meter sent it.
-- `math_mode` and `limit_result` are filled from `math_mode_text` and `limit_result_text`, the one place that has to
-  learn about Math Operations. Until the Meter's Math is modelled they are empty.
+- `math_mode` is the Math Operation in effect (`NULL`, `DB`, `DBM`, `STATS` or `LIMIT`), empty for none; `limit_result`
+  is `HI`, `LO` or `PASS` while a Limit Test runs, empty otherwise. They are made by `math_mode_text` and
+  `limit_result_text`. With Null the `value` is the Reading minus the offset, and with dB or dBm it is in dB or dBm and
+  `unit` says so; `raw` is still exactly what the Meter sent.
 
 The file is UTF-8 (the Ω unit), with LF line endings on every platform, and is flushed after every row.
 
@@ -54,17 +57,14 @@ class LoggedReading:
     setup: Setup | None = None
 
 
-def math_mode_text(setup: Setup) -> str:  # noqa: ARG001 - the Setup will carry the Math Operation
-    """Name the Math Operation that was active when the Reading was taken, or "" for none.
-
-    The Setup has no Math settings yet; when it does, this is the one place to turn them into the column's text.
-    """
-    return ""
+def math_mode_text(setup: Setup) -> str:
+    """Name the Math Operation that was active when the Reading was taken (NULL, DB, DBM, STATS, LIMIT), or "" for none."""
+    return "" if setup.math.operation is None else setup.math.operation.csv_name
 
 
-def limit_result_text(reading: Reading) -> str:  # noqa: ARG001 - the Reading will carry the Limit Test result
+def limit_result_text(reading: Reading) -> str:
     """Say how the Reading did in a Limit Test ("HI", "LO", "PASS"), or "" when no Limit Test was running."""
-    return ""
+    return "" if reading.limit is None else reading.limit.label
 
 
 def csv_row(item: LoggedReading) -> list[str]:
@@ -77,11 +77,17 @@ def csv_row(item: LoggedReading) -> list[str]:
         reading.function.label,
         "" if setup is None else _range_text(setup),
         OVERLOAD_TEXT if reading.is_overload else repr(reading.value),
-        reading.function.unit,
+        reading.unit,
         reading.raw.strip(),
-        "" if setup is None else math_mode_text(setup),
+        _math_mode(item),
         limit_result_text(reading),
     ]
+
+
+def _math_mode(item: LoggedReading) -> str:
+    if item.setup is not None:
+        return math_mode_text(item.setup)
+    return "" if item.reading.math is None else item.reading.math.csv_name  # the Reading knows when the Setup is not
 
 
 def _range_text(setup: Setup) -> str:

@@ -21,6 +21,7 @@ from agilent34401a.meter import (
     Terminals,
     measurement_time,
 )
+from agilent34401a.sim_math import MathUnit
 from agilent34401a.sim_trigger import SimHost, TriggerModel
 
 HEWLETT_PACKARD_IDENTITY = "HEWLETT-PACKARD,34401A,0,10-5-2"
@@ -29,7 +30,7 @@ AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
 TIME_SCALE_ENV_VAR = "AGILENT34401A_SIM_TIME_SCALE"
 """Overrides the default time scale: 1 is real time, 0 is instant."""
 
-_OVERLOAD_REPLY = "9.90000000E+37"
+_OVERLOAD_VALUE = 9.9e37
 _OVER_RANGE = 1.2  # most ranges read up to 120 % of their full scale
 # These ranges cannot be exceeded: the 1000 V and 750 V limits are safety limits, and 3 A is the fuse.
 _NO_OVER_RANGE = frozenset(
@@ -122,6 +123,20 @@ _LONG_FORMS = {
     "INITIATE": "INIT",
     "FETCH": "FETC",
     "POINTS": "POIN",
+    "CALCULATE": "CALC",
+    "OFFSET": "OFFS",
+    "REFERENCE": "REF",
+    "LIMIT": "LIM",
+    "LOWER": "LOW",
+    "UPPER": "UPP",
+    "AVERAGE": "AVER",
+    "MINIMUM": "MIN",
+    "MAXIMUM": "MAX",
+    "QUESTIONABLE": "QUES",
+    "CONDITION": "COND",
+    "ENABLE": "ENAB",
+    "EVENT": "EVEN",
+    "STATUS": "STAT",
 }
 
 # What `FUNC?` answers for each Function.
@@ -244,6 +259,7 @@ class Simulator:
                 clock=clock,
             )
         )
+        self._math = MathUnit(self._reply, self._errors.append)
         self._reset()
 
     @property
@@ -258,6 +274,7 @@ class Simulator:
     def _reset(self) -> None:
         self._trigger.reset()
         self._function = Function.DC_VOLTAGE
+        self._math.reset()
         self.display_on = True
         self.display_text = ""
         self._ranges: dict[Function, float | None] = dict.fromkeys(_SETTING_GROUPS.values())
@@ -289,6 +306,9 @@ class Simulator:
             self._reply(self._errors.popleft() if self._errors else _NO_ERROR)
         elif key == "FUNC":
             self._function_command(query=query, argument=argument)
+        elif self._math.handles(key):
+            if not self._math.command(key, query=query, argument=argument, function=self._function):
+                self._errors.append(_UNDEFINED_HEADER)
         elif self._system_command(key, query=query, argument=argument) or self._trigger.command(
             key, query=query, argument=argument
         ):
@@ -308,10 +328,12 @@ class Simulator:
             case "*CLS":
                 self._errors.clear()
                 self._trigger.clear_status()
+                self._math.clear_status()
             case "*RST":
                 self._reset()
             case "*STB?":
-                self._reply(str((_ERROR_QUEUE_STATUS_BIT if self._errors else 0) | self._trigger.status_bits()))
+                status = (_ERROR_QUEUE_STATUS_BIT if self._errors else 0) | self._trigger.status_bits()
+                self._reply(str(status | self._math.status_byte_bits))
             case "*TST?":
                 passed = self.self_test_passes
                 if not passed:
@@ -380,6 +402,8 @@ class Simulator:
         if function is None:
             self._errors.append(_ILLEGAL_PARAMETER)
         else:
+            if function is not self._function:
+                self._math.function_changed()  # the Meter turns its Math Operation off with a change of Function
             self._function = function
 
     def _setting_command(self, path: tuple[str, ...], *, query: bool, argument: str) -> bool:
@@ -559,6 +583,10 @@ class Simulator:
         )
 
     def _measure(self, setup: Setup) -> str:
+        """Take a Reading and return the Meter's reply: the measured value, or the Math Operation's result."""
+        return _number_reply(self._math.process(self._measured_value(setup)))
+
+    def _measured_value(self, setup: Setup) -> float:
         function = setup.function
         signal = self._signals[function].at(self._signal_time, self._random)
         self._signal_time += measurement_time(setup)
@@ -568,13 +596,13 @@ class Simulator:
                 return _overload(signal)
             # The last displayed digit is a millionth of the range at 6½ digits, a hundred-thousandth at 5½.
             step = range_in_use / 10 ** (setup.resolution.significant_digits - 1)
-            value = round(signal / step) * step
+            value = float(round(signal / step) * step)
         else:
             limits = {Function.CONTINUITY: _CONTINUITY_LIMIT, Function.DIODE: _DIODE_LIMIT}
             if abs(signal) > limits.get(function, math.inf):
                 return _overload(signal)
             value = float(f"{signal:.{setup.resolution.significant_digits - 1}e}")
-        return _number_reply(value)
+        return value
 
     @property
     def has_reply(self) -> bool:
@@ -651,5 +679,5 @@ def _number_reply(value: float) -> str:
     return f"{value + 0.0:+.8E}"
 
 
-def _overload(signal: float) -> str:
-    return f"{'-' if signal < 0 else '+'}{_OVERLOAD_REPLY}"
+def _overload(signal: float) -> float:
+    return math.copysign(_OVERLOAD_VALUE, signal)

@@ -812,7 +812,7 @@ def test_a_raw_calibration_write_is_refused_and_never_reaches_the_meter(started)
     assert "calibration" in refused.message
     worker.send_raw("*IDN?")
     next_event(events)
-    assert not any(command.upper().startswith("CAL") for command in simulator.writes)
+    assert not any(command.upper().startswith("CAL:") for command in simulator.writes)
 
 
 def test_a_raw_calibration_write_goes_through_when_it_is_explicitly_allowed(started):

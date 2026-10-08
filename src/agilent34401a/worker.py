@@ -32,6 +32,7 @@ from agilent34401a.errors import (
     TransportError,
     TransportTimeoutError,
 )
+from agilent34401a.math_operations import MathOperation, MeterStatistics
 from agilent34401a.meter import Function, Reading, Setup, Terminals, reading_timeout
 from agilent34401a.resync import Sentinel, resynchronise
 from agilent34401a.transport import LocalControl, RemoteControl, Transport, supports_device_clear
@@ -148,6 +149,13 @@ class ErrorsReported:
 
 
 @dataclass(frozen=True)
+class StatisticsRead:
+    """The Meter's own Statistics (minimum, maximum, average, count). Follows each Reading while they are in effect."""
+
+    statistics: MeterStatistics
+
+
+@dataclass(frozen=True)
 class SystemRead:
     """The Meter's system information, read after a request for it or after a change to the beeper or display."""
 
@@ -257,6 +265,7 @@ Event = (
     | RawReplied
     | RawRefused
     | RawFailed
+    | StatisticsRead
     | SystemRead
     | ResetDone
     | SelfTestFinished
@@ -459,6 +468,16 @@ class Worker:
         """Run the Meter's self-test, which takes about ten seconds; the Worker serves nothing else meanwhile."""
         self._requests.put(_System("Self-test", self._self_test, setup_follows=True))
 
+    def read_statistics(self) -> None:
+        """Ask the Meter for its Statistics now; the answer is a `StatisticsRead`."""
+        self._requests.put(
+            _System("Reading the Statistics", lambda driver: [StatisticsRead(driver.fetch_statistics())])
+        )
+
+    def reset_statistics(self) -> None:
+        """Start the Meter's Statistics again; the answer is a `StatisticsRead` of the empty Statistics."""
+        self._requests.put(_System("Resetting the Statistics", self._reset_statistics))
+
     def check_errors(self) -> None:
         """Drain the Meter's error queue now, whatever its status byte says."""
         self._requests.put(_System("Checking for errors", lambda driver: _report(driver.drain_errors())))
@@ -637,6 +656,19 @@ class Worker:
             return
         self._failures = 0
         self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup, self._wall_clock()))
+        if reading.math is MathOperation.STATISTICS:
+            self._report_statistics(driver, transport)
+
+    def _report_statistics(self, driver: Driver, transport: Transport) -> None:
+        """Follow a Reading with the Meter's Statistics, which that Reading is part of."""
+        try:
+            statistics = driver.fetch_statistics()
+        except (MalformedReplyError, TransportTimeoutError) as error:
+            _LOG.warning("Lost the Statistics, resynchronising the Connection: %s", error)
+            self._events.put(ReadingFailed(f"Statistics lost: {error}"))
+            transport.clear()
+            return
+        self._events.put(StatisticsRead(statistics))
 
     def _run_burst(self, driver: Driver, transport: Transport, trigger: TriggerSettings) -> _Request | None:
         """Run one Burst from start to collection; return the request that ended the Connection meanwhile, if any."""
@@ -844,6 +876,11 @@ class Worker:
     @staticmethod
     def _reset(driver: Driver) -> list[Event]:
         return _report(driver.reset())
+
+    @staticmethod
+    def _reset_statistics(driver: Driver) -> list[Event]:
+        errors = driver.reset_statistics()
+        return [*_report(errors), StatisticsRead(driver.fetch_statistics())]
 
     @staticmethod
     def _self_test(driver: Driver) -> list[Event]:

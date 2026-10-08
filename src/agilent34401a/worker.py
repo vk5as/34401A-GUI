@@ -27,7 +27,7 @@ from agilent34401a.errors import (
     TransportTimeoutError,
 )
 from agilent34401a.meter import Function, Reading, Setup, Terminals, reading_timeout
-from agilent34401a.transport import LocalControl, Transport
+from agilent34401a.transport import LocalControl, RemoteControl, Transport
 
 _LOG = logging.getLogger(__name__)
 
@@ -394,6 +394,8 @@ class Worker:
         try:
             try:
                 transport = open_transport()
+                if isinstance(transport, RemoteControl):
+                    transport.go_to_remote()  # RS-232 only listens to a Meter that has been told it is Remote
                 driver = Driver(transport)
                 identity = driver.identify()
                 setup = driver.read_setup()

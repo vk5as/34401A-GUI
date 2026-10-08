@@ -43,6 +43,11 @@ class MathOperation(Enum):
         return _CSV_NAMES[self]
 
     @property
+    def changes_the_reading(self) -> bool:
+        """Whether the Reading the Meter sends is the Operation's result rather than the measured value."""
+        return self in (MathOperation.NULL, MathOperation.DB, MathOperation.DBM)
+
+    @property
     def in_decibels(self) -> bool:
         """Whether the Reading the Meter sends is in dB or dBm rather than in the unit of the Function."""
         return self in (MathOperation.DB, MathOperation.DBM)

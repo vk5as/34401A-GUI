@@ -304,8 +304,9 @@ class ChartTab(ttk.Frame):
         if not entries:
             self.axes.set_ylabel("")
             return
-        function = entries[-1].reading.function
-        self.axes.set_ylabel(f"{function.label} ({function.unit})" if function.unit else function.label)
+        latest = entries[-1].reading
+        label = latest.function.label
+        self.axes.set_ylabel(f"{label} ({latest.unit})" if latest.unit else label)
 
     def _fit(self, xs: list[float], entries: tuple[HistoryEntry, ...]) -> None:
         """Fit the view to all of the History across, and to the latest Function's Readings up and down."""

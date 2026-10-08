@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 
+from agilent34401a.math_operations import MathOperation
 from agilent34401a.meter import Function, Reading, Setup
 
 DEFAULT_HISTORY_LENGTH = 10_000
@@ -62,8 +63,14 @@ def _check_length(length: int) -> int:
 
 
 def _breaks(before: Reading, after: Reading) -> bool:
-    """Whether Readings of these two kinds are not comparable: the Function or its unit changed."""
-    return before.function is not after.function or before.function.unit != after.function.unit
+    """Whether Readings of these two kinds are not comparable: the Function, its unit or what Null/dB/dBm did changed."""
+    return before.function is not after.function or _meaning(before) != _meaning(after)
+
+
+def _meaning(reading: Reading) -> tuple[str, MathOperation | None]:
+    """Return what the number in a Reading is: its unit, and the Operation that changed it, if one did."""
+    changed_by = reading.math if reading.math is not None and reading.math.changes_the_reading else None
+    return reading.unit, changed_by
 
 
 class History:

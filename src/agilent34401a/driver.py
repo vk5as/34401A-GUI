@@ -2,9 +2,15 @@
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from agilent34401a.errors import CalibrationBlockedError, MalformedReplyError, UnrecognisedIdentityError
+from agilent34401a.errors import (
+    CalibrationBlockedError,
+    InvalidSetupError,
+    MalformedReplyError,
+    UnrecognisedIdentityError,
+)
+from agilent34401a.math_operations import MathOperation, MathSettings, MeterStatistics, limit_result_from_status
 from agilent34401a.meter import (
     NPLC_VALUES,
     AcFilter,
@@ -67,6 +73,18 @@ _FUNCTION_ANSWERS = {
     "DIOD": Function.DIODE,
     "VOLT:RAT": Function.DC_VOLTAGE_RATIO,
     "VOLT:DC:RAT": Function.DC_VOLTAGE_RATIO,
+}
+
+
+# What `CALC:FUNC?` may answer, short and long forms.
+_MATH_ANSWERS = {
+    "NULL": MathOperation.NULL,
+    "DB": MathOperation.DB,
+    "DBM": MathOperation.DBM,
+    "AVER": MathOperation.STATISTICS,
+    "AVERAGE": MathOperation.STATISTICS,
+    "LIM": MathOperation.LIMIT_TEST,
+    "LIMIT": MathOperation.LIMIT_TEST,
 }
 
 
@@ -147,14 +165,25 @@ class Driver:
         return Identity(manufacturer=manufacturer, model=model, serial=serial, firmware=firmware, raw=raw)
 
     def read(self) -> Reading:
-        """Take one Reading in the Function of the current Setup."""
-        return parse_reading(self._transport.query("READ?"), self._setup.function)
+        """Take one Reading in the Function of the current Setup, tagged with its Math Operation and Limit Test result.
+
+        With a Limit Test running, the Meter's Questionable Data register says how the Reading did, which costs one more
+        query. A Reading under Null, dB or dBm is the Operation's result, not the measured value.
+        """
+        reading = parse_reading(self._transport.query("READ?"), self._setup.function)
+        operation = self._setup.math.operation
+        if operation is None:
+            return reading
+        limit = None
+        if operation is MathOperation.LIMIT_TEST:
+            limit = limit_result_from_status(int(self._read_number("STAT:QUES:EVEN?")))
+        return replace(reading, math=operation, limit=limit)
 
     def apply(self, setup: Setup) -> list[QueuedError]:
         """Send a Setup to the Meter, then drain its error queue (ADR-0005) and return what it complained about.
 
         Settings go in a fixed order: Function, then Range, then Integration Time or Gate Time (which also set the
-        Resolution), then the AC Filter, Autozero and Input Impedance.
+        Resolution), then the AC Filter, Autozero and Input Impedance, and last the Math settings and Operation.
         A non-empty result means the Meter may not be in `setup`; `read_setup` says what it is in.
         """
         function = setup.function
@@ -173,6 +202,8 @@ class Driver:
             write(f"ZERO:AUTO {setup.autozero.value}")
         if setup.input_impedance is not None:
             write(f"INP:IMP:AUTO {'ON' if setup.input_impedance is InputImpedance.HIGH_IMPEDANCE else 'OFF'}")
+        if function.has_math and self._math_needs_sending(setup):
+            self._apply_math(setup.math)
         self._setup = setup
         return self.drain_errors()
 
@@ -209,8 +240,82 @@ class Driver:
         if function.has_input_impedance:
             impedance = InputImpedance.HIGH_IMPEDANCE if self._read_flag("INP:IMP:AUTO?") else InputImpedance.TEN_MEGOHM
             setup = setup.with_input_impedance(impedance)
+        if function.has_math:
+            setup = self._with_math_read(setup)
         self._setup = setup
         return setup
+
+    def _math_needs_sending(self, setup: Setup) -> bool:
+        """Whether the Meter's Math differs from `setup`'s, as far as the driver knows.
+
+        A change of Function turns the Operation off, so an Operation wanted in another Function must be sent again.
+        Leaving the rest alone also keeps Statistics running while other settings are changed.
+        """
+        known = self._setup
+        if setup.math != known.math:
+            return True
+        return setup.math.operation is not None and setup.function is not known.function
+
+    def _apply_math(self, settings: MathSettings) -> None:
+        """Send the settings of every Math Operation, then turn the one in effect on (or all of them off)."""
+        write = self._transport.write
+        write(f"CALC:NULL:OFFS {settings.null_offset:g}")
+        write(f"CALC:DB:REF {settings.db_reference:g}")
+        write(f"CALC:DBM:REF {settings.dbm_reference_resistance:g}")
+        write(f"CALC:LIM:LOW {settings.limit_lower:g}")
+        write(f"CALC:LIM:UPP {settings.limit_upper:g}")
+        operation = settings.operation
+        if operation is None:
+            write("CALC:STAT OFF")
+            return
+        write(f"CALC:FUNC {operation.value}")
+        write("CALC:STAT ON")
+        if operation is MathOperation.LIMIT_TEST:
+            self._transport.query("STAT:QUES:EVEN?")  # forget failures latched before this Limit Test began
+
+    def _with_math_read(self, setup: Setup) -> Setup:
+        """Ask the Meter which Math Operation it is doing and with what settings, and put that in `setup`."""
+        operation = None
+        if self._read_flag("CALC:STAT?"):
+            answer = self._transport.query("CALC:FUNC?").strip().strip('"').upper()
+            operation = _MATH_ANSWERS.get(answer)
+            if operation is None:
+                message = f"Meter replied {answer!r} to CALC:FUNC?, which is not a Math Operation"
+                raise MalformedReplyError(message)
+        try:
+            settings = MathSettings(
+                operation=operation,
+                null_offset=self._read_number("CALC:NULL:OFFS?"),
+                db_reference=self._read_number("CALC:DB:REF?"),
+                dbm_reference_resistance=self._read_number("CALC:DBM:REF?"),
+                limit_lower=self._read_number("CALC:LIM:LOW?"),
+                limit_upper=self._read_number("CALC:LIM:UPP?"),
+            )
+            return setup.with_math(settings)
+        except InvalidSetupError as error:
+            message = f"Meter reported Math that {setup.function.label} cannot have: {error}"
+            raise MalformedReplyError(message) from error
+
+    def fetch_statistics(self) -> MeterStatistics:
+        """Ask the Meter for the minimum, maximum, average and count of the Readings since Statistics was turned on."""
+        return MeterStatistics(
+            minimum=self._read_number("CALC:AVER:MIN?"),
+            maximum=self._read_number("CALC:AVER:MAX?"),
+            average=self._read_number("CALC:AVER:AVER?"),
+            count=round(self._read_number("CALC:AVER:COUN?")),
+        )
+
+    def reset_statistics(self) -> list[QueuedError]:
+        """Start the Meter's Statistics again by turning the Operation off and on, and drain its error queue.
+
+        Raises `ValueError` unless Statistics is the Math Operation in effect.
+        """
+        if self._setup.math.operation is not MathOperation.STATISTICS:
+            message = "Only Statistics can be reset, and it is not the Math Operation in effect"
+            raise ValueError(message)
+        self._transport.write("CALC:STAT OFF")
+        self._transport.write("CALC:STAT ON")
+        return self.drain_errors()
 
     def send_raw(self, command: str, *, allow_calibration: bool = False) -> RawResult:
         """Send `command` as typed, which may be several commands joined with `;`, and return the Meter's reply.

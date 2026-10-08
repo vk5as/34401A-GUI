@@ -4,8 +4,10 @@ Pure data with validation; opening a port is `visa.py`'s business.
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 BAUD_RATES = (300, 600, 1200, 2400, 4800, 9600)
 """The baud rates the 34401A offers, slowest first."""
@@ -137,6 +139,38 @@ class SerialSettings:
         if com is not None:
             return f"ASRL{com.group(1)}{_RESOURCE_SUFFIX}"
         return f"ASRL{port}{_RESOURCE_SUFFIX}"
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the settings as plain JSON data, for the settings file."""
+        return {
+            "port": self.port,
+            "baud": self.baud,
+            "framing": self.framing.label,
+            "flow_control": self.flow_control.value,
+            "terminator": self.terminator.value,
+            "dtr": self.dtr,
+            "rts": self.rts,
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> "SerialSettings":
+        """Read settings written by `to_json`; raise `ValueError`, `KeyError` or `TypeError` if they do not fit."""
+        dtr, rts = data["dtr"], data["rts"]
+        if not all(line is None or isinstance(line, bool) for line in (dtr, rts)):
+            message = "DTR and RTS are true, false or null"
+            raise TypeError(message)
+        if not isinstance(data["port"], str) or not isinstance(data["baud"], int):
+            message = "The port is text and the baud rate a whole number"
+            raise TypeError(message)
+        return cls(
+            port=data["port"],
+            baud=data["baud"],
+            framing=Framing.from_label(data["framing"]),
+            flow_control=FlowControl(data["flow_control"]),
+            terminator=Terminator(data["terminator"]),
+            dtr=dtr,
+            rts=rts,
+        )
 
     def describe(self) -> str:
         """Return the settings in one line for a status bar or a message."""

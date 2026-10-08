@@ -12,11 +12,13 @@ from pyvisa.errors import VisaIOError
 from pyvisa.resources import MessageBasedResource
 
 from agilent34401a.backend import BackendStatus
-from agilent34401a.errors import BackendUnavailableError, TransportError, TransportTimeoutError
+from agilent34401a.errors import BackendUnavailableError, MalformedReplyError, TransportError, TransportTimeoutError
 
 _DEFAULT_TIMEOUT_S = 2.0
 _MS_PER_S = 1000
 _TERMINATION = "\n"
+_DRAIN_TIMEOUT_S = 0.05  # how long a socket must stay quiet for `clear` to call it empty
+_MAX_DRAIN_READS = 100  # a socket that never stops talking is not cleared, but it is not waited for forever either
 _VENDOR_HINT = "Install Keysight IO Libraries Suite (or NI-VISA) to use this Backend."
 
 
@@ -59,10 +61,11 @@ def _visa_errors() -> Iterator[None]:
 class VisaTransport:
     """A Transport over one open pyvisa resource. It owns the resource and its manager."""
 
-    def __init__(self, resource: _Resource, manager: _Manager, *, gpib: bool = False) -> None:
+    def __init__(self, resource: _Resource, manager: _Manager, *, gpib: bool = False, socket: bool = False) -> None:
         self._resource = resource
         self._manager = manager
         self._gpib = gpib
+        self._socket = socket
         self._closed = False
         self.timeout = _DEFAULT_TIMEOUT_S
 
@@ -83,7 +86,11 @@ class VisaTransport:
     def read(self) -> str:
         self._require_open()
         with _visa_errors():
-            return self._resource.read().rstrip("\r\n")
+            try:
+                return self._resource.read().rstrip("\r\n")
+            except UnicodeDecodeError as error:
+                message = f"The Meter's reply is not text: {error}"
+                raise MalformedReplyError(message) from error
 
     def query(self, command: str) -> str:
         self.write(command)
@@ -91,8 +98,36 @@ class VisaTransport:
 
     def clear(self) -> None:
         self._require_open()
+        if self._socket:
+            self._drain()
+            return
         with _visa_errors():
             self._resource.clear()
+
+    def _drain(self) -> None:
+        """Read and throw away whatever a socket still has to say, until it has been quiet for a moment.
+
+        A socket has no device clear to send, and pyvisa-py's own `clear()` never returns once the other end has
+        closed the connection, so this stands in for it.
+        """
+        timeout = self._resource.timeout
+        self._resource.timeout = round(_DRAIN_TIMEOUT_S * _MS_PER_S)
+        try:
+            for _ in range(_MAX_DRAIN_READS):
+                if not self._discard_one_reply():
+                    return
+        finally:
+            self._resource.timeout = timeout
+
+    def _discard_one_reply(self) -> bool:
+        """Read one reply and drop it; False once nothing more arrives."""
+        try:
+            self.read()
+        except MalformedReplyError:
+            pass  # noise is still something to throw away
+        except TransportTimeoutError:
+            return False
+        return True
 
     def go_to_local(self) -> None:
         """Address a GPIB Meter to Local (the REN line's go-to-local); other buses have no REN line, so nothing.
@@ -176,7 +211,12 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
         _release(resource, manager)
         message = f"Could not open {resource_name}: {error}"
         raise TransportError(message) from error
-    return VisaTransport(resource, manager, gpib=resource_name.upper().startswith("GPIB"))
+    return VisaTransport(
+        resource,
+        manager,
+        gpib=resource_name.upper().startswith("GPIB"),
+        socket=resource_name.upper().endswith("::SOCKET"),
+    )
 
 
 def list_resources(library: str) -> list[str]:

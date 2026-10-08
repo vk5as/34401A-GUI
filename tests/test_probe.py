@@ -2,6 +2,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from agilent34401a.driver import Identity
+from agilent34401a.errors import TransportError
 from agilent34401a.probe import (
     NOT_FOUND_GUIDANCE,
     ProbeJob,
@@ -154,6 +155,20 @@ def test_a_port_that_cannot_be_opened_ends_probe_at_once_with_the_reason():
     assert result.tried == 1
     assert "no such serial port" in result.message
     assert "null-modem" not in result.message
+
+
+def test_a_framing_the_port_refuses_is_skipped_rather_than_ending_probe():
+    simulated = SimulatedSerialMeter(baud=4800)
+
+    def refuse_seven_bits(settings: SerialSettings) -> Transport:
+        if settings.framing.data_bits == 7:
+            message = "Could not open: (22, 'Invalid argument')"
+            raise TransportError(message)
+        return simulated.open(settings)
+
+    result = run_probe(refuse_seven_bits, BASE)
+
+    assert result.found == SerialSettings(port="SIM", baud=4800)
 
 
 def test_probe_stops_between_attempts_when_cancelled():

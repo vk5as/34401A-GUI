@@ -99,19 +99,21 @@ class ProbeResult:
         return f"No Meter answered at any of the {self.tried} settings tried. {' '.join(advice)}"
 
 
-def run_probe(
+def run_probe(  # noqa: PLR0913 - every option after the port settings is keyword-only and optional
     open_serial: OpenSerialPort,
     base: SerialSettings,
     *,
     include_flow_control: bool = False,
     progress: Callable[[ProbeProgress], None] | None = None,
     cancel: threading.Event | None = None,
+    timeout_for: Callable[[int], float] = reply_timeout,
 ) -> ProbeResult:
     """Try each candidate until the Meter answers `*IDN?` as a 34401A, and say how it went.
 
     `progress` hears of every attempt before it is made. Setting `cancel` stops Probe before its next attempt, which
-    is at most one reply timeout (under two seconds at 300 baud) away. A port that cannot be opened ends Probe at
-    once, because every other attempt would fail the same way. The Meter is left in Local, with the port closed.
+    is at most one reply timeout (under two seconds at 300 baud) away. A port that cannot be opened with the first
+    attempt's settings ends Probe at once; one that refuses a later Framing just skips it. `timeout_for` gives the
+    seconds to wait for a reply at a baud rate. The Meter is left in Local, with the port closed.
     """
     candidates = probe_candidates(base, include_flow_control=include_flow_control)
     total = len(candidates)
@@ -145,8 +147,11 @@ def run_probe(
         try:
             transport = open_serial(candidate)
         except MeterError as error:
-            return result(problem=str(error))
-        identity = _ask(transport, candidate)
+            if attempt == 1:  # the usual Framing could not be opened, so it is the port that is wrong
+                return result(problem=str(error))
+            _LOG.debug("Could not open %s: %s", candidate.describe(), error)  # a Framing this port refuses
+            continue
+        identity = _ask(transport, candidate, timeout_for(candidate.baud))
         if identity is not None:
             return result(candidate, identity)
     if cancel is not None and cancel.is_set():
@@ -154,10 +159,10 @@ def run_probe(
     return result()
 
 
-def _ask(transport: Transport, settings: SerialSettings) -> Identity | None:
+def _ask(transport: Transport, settings: SerialSettings, timeout: float) -> Identity | None:
     """Ask `*IDN?` over `transport` and close it; return the identity if a 34401A answered."""
     try:
-        transport.timeout = reply_timeout(settings.baud)
+        transport.timeout = timeout
         if isinstance(transport, RemoteControl):
             transport.go_to_remote()
         try:

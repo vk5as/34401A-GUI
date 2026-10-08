@@ -15,7 +15,7 @@ from agilent34401a import __version__
 from agilent34401a.connection import detect_all_backends, open_transport, scan_resources
 from agilent34401a.errors import InvalidSetupError
 from agilent34401a.gui.chart_tab import install_chart
-from agilent34401a.gui.connection_dialog import ConnectionDialog, Detect, Scan
+from agilent34401a.gui.connection_dialog import ConnectionDialog, Detect, Scan, StartProbe
 from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.gui.recording import install_recording
@@ -33,6 +33,7 @@ from agilent34401a.meter import (
     format_range,
     format_reading,
 )
+from agilent34401a.probe import start_probe
 from agilent34401a.rate import ReadingRate
 from agilent34401a.settings import LastConnection, Settings, Theme
 from agilent34401a.sim import DEMO_SIGNALS, Simulator
@@ -104,7 +105,10 @@ def opener_for(choice: LastConnection) -> Callable[[], Transport]:
 
 def describe_connection(choice: LastConnection) -> str:
     """Name the resource of `choice` as the status bar shows it."""
-    return _SIMULATOR if choice.simulate else choice.connection.resource_name
+    if choice.simulate:
+        return _SIMULATOR
+    serial = choice.connection.serial
+    return choice.connection.resource_name if serial is None else serial.describe()
 
 
 @dataclass(frozen=True)
@@ -134,12 +138,14 @@ class MainWindow:
         make_opener: MakeOpener | None = None,
         detect: Detect | None = None,
         scan: Scan | None = None,
+        probe: StartProbe | None = None,
     ) -> None:
         self.root = root
         self.settings = settings if settings is not None else Settings.in_memory()
         self._make_opener = make_opener or opener_for
         self._detect = detect or detect_all_backends
         self._scan = scan or scan_resources
+        self._probe = probe or start_probe
         self.connection_dialog: ConnectionDialog | None = None
         self._resource = resource
         self._events: queue.Queue[Event] = queue.Queue()
@@ -492,7 +498,13 @@ class MainWindow:
             on_connect=self._on_dialog_connect,
             initial=self.settings.last_connection,
             auto_reconnect=self.settings.auto_reconnect,
+            probe=self._probe,
+            probe_allowed=self._can_probe,
         )
+
+    def _can_probe(self) -> bool:
+        """Probe opens the serial port itself, so it waits until the window has no Connection (ADR-0002)."""
+        return not self._has_connection
 
     def _on_dialog_connect(self, choice: LastConnection, auto_reconnect: bool) -> None:  # noqa: FBT001
         self.settings.auto_reconnect = auto_reconnect

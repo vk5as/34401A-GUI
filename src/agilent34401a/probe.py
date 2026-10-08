@@ -12,6 +12,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from agilent34401a.backend import Backend
 from agilent34401a.driver import Driver, Identity
 from agilent34401a.errors import MeterError
 from agilent34401a.serial_config import BAUD_RATES, METER_FRAMINGS, FlowControl, SerialSettings
@@ -62,6 +63,13 @@ class ProbeProgress:
     attempt: int
     total: int
     settings: SerialSettings
+
+    @property
+    def message(self) -> str:
+        """Say what is being tried, such as `Trying 9600 baud 8N1 (1/18)`; Flow Control only when there is some."""
+        settings = self.settings
+        flow = "" if settings.flow_control is FlowControl.NONE else f", {settings.flow_control.label} Flow Control"
+        return f"Trying {settings.baud} baud {settings.framing.label}{flow} ({self.attempt}/{self.total})"
 
 
 @dataclass(frozen=True)
@@ -168,6 +176,17 @@ def _ask(transport: Transport, settings: SerialSettings) -> Identity | None:
     finally:
         with contextlib.suppress(MeterError):
             transport.close()
+
+
+def start_probe(base: SerialSettings, backend: Backend, include_flow_control: bool) -> "ProbeJob":  # noqa: FBT001
+    """Make a Probe of the real serial port `base` names, opened through `backend`; the caller starts it."""
+    # Imported here so that nothing needs pyvisa until a real Probe is wanted.
+    from agilent34401a.connection import ConnectionSettings, open_transport  # noqa: PLC0415
+
+    def open_port(candidate: SerialSettings) -> Transport:
+        return open_transport(ConnectionSettings(backend=backend, serial=candidate))
+
+    return ProbeJob(open_port, base, include_flow_control=include_flow_control)
 
 
 class ProbeJob:

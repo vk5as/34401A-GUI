@@ -1,6 +1,6 @@
 import pytest
 
-from agilent34401a import cli, cli_serial
+from agilent34401a import cli, cli_serial, connection
 from agilent34401a.backend import Backend
 from agilent34401a.cli import main
 from agilent34401a.connection import ConnectionSettings
@@ -31,7 +31,7 @@ def _line(monkeypatch: pytest.MonkeyPatch, line: SimulatedSerialMeter) -> list[C
         return line.open(settings.serial)
 
     monkeypatch.setattr(cli, "open_transport", open_line)
-    monkeypatch.setattr(cli_serial, "open_transport", open_line)
+    monkeypatch.setattr(connection, "open_transport", open_line)
     return opened
 
 

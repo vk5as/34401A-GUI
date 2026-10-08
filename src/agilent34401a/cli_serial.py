@@ -8,8 +8,7 @@ import queue
 import sys
 
 from agilent34401a.backend import Backend
-from agilent34401a.connection import ConnectionSettings, open_transport
-from agilent34401a.probe import ProbeJob, ProbeProgress, ProbeResult
+from agilent34401a.probe import ProbeJob, ProbeProgress, ProbeResult, start_probe
 from agilent34401a.serial_config import (
     BAUD_RATES,
     FlowControl,
@@ -18,7 +17,6 @@ from agilent34401a.serial_config import (
     SerialSettings,
     Terminator,
 )
-from agilent34401a.transport import Transport
 
 PROG = "agilent34401a-cli"
 INTERRUPTED = 130  # the exit code a shell gives a program that Ctrl-C stopped
@@ -119,11 +117,7 @@ def add_probe_options(parser: argparse.ArgumentParser) -> None:
 
 def show_progress(progress: ProbeProgress) -> None:
     """Say on stderr which settings Probe is about to try."""
-    settings = progress.settings
-    flow = "" if settings.flow_control is FlowControl.NONE else f", {settings.flow_control.label} Flow Control"
-    sys.stderr.write(
-        f"Trying {settings.baud} baud {settings.framing.label}{flow} ({progress.attempt}/{progress.total})\n"
-    )
+    sys.stderr.write(f"{progress.message}\n")
 
 
 def run_probe(args: argparse.Namespace) -> int:
@@ -134,10 +128,7 @@ def run_probe(args: argparse.Namespace) -> int:
         parser.error("the following arguments are required: --serial-port")
     backend = Backend.AUTO if args.backend is None else Backend(args.backend)
 
-    def open_port(candidate: SerialSettings) -> Transport:
-        return open_transport(ConnectionSettings(backend=backend, serial=candidate))
-
-    job = ProbeJob(open_port, settings, include_flow_control=args.include_flow_control)
+    job = start_probe(settings, backend, args.include_flow_control)
     job.start()
     try:
         result = _wait(job, quiet=args.quiet)

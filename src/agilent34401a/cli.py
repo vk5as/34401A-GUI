@@ -5,8 +5,9 @@ import math
 import sys
 from collections.abc import Callable, Sequence
 from functools import partial
+from pathlib import Path
 
-from agilent34401a import __version__, cli_admin, cli_raw
+from agilent34401a import __version__, cli_admin, cli_log, cli_raw
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings, open_transport
 from agilent34401a.driver import Driver, QueuedError
@@ -44,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Each subcommand lives in its own _add_<name>_command and registers here with one line.
     _add_read_command(subparsers)
     _add_raw_command(subparsers)
+    _add_log_command(subparsers)
     _add_admin_commands(subparsers)
 
     args = parser.parse_args(argv)
@@ -196,6 +198,55 @@ def _run_raw(args: argparse.Namespace) -> int:
         args,
         lambda driver, transport: cli_raw.send_raw(
             driver, transport, args.command, allow_calibration=args.allow_calibration, prog=_PROG
+        ),
+    )
+
+
+def _add_log_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "log",
+        _run_log,
+        summary="take Readings and write them as CSV",
+        description=(
+            "Take Readings with the Meter's current Setup and write them as CSV, to standard output or a file. "
+            "Give --count, --duration or both; the log ends at whichever comes first. The columns are "
+            "timestamp_iso, elapsed_s, function, range, value, unit, raw, math_mode and limit_result."
+        ),
+    )
+    add_connection_options(parser)
+    parser.add_argument("-n", "--count", type=_positive_int, help="stop after this many Readings")
+    parser.add_argument("--duration", type=_positive_seconds, metavar="SECONDS", help="stop after this many seconds")
+    parser.add_argument("-o", "--output", type=Path, help="write the CSV to this file instead of standard output")
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        message = f"expected a whole number of at least 1, got {text!r}"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
+def _positive_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        message = f"expected a number of seconds above 0, got {text!r}"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
+def _run_log(args: argparse.Namespace) -> int:
+    return run_on_meter(
+        args,
+        lambda driver, transport: cli_log.log(
+            driver, transport, count=args.count, duration_s=args.duration, output=args.output, prog=_PROG
         ),
     )
 

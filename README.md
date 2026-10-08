@@ -36,6 +36,21 @@ agilent34401a-cli raw --simulate "*IDN?"
 agilent34401a-cli raw --simulate "VOLT:DC:NPLC 10"        # a command: no reply, exit 1 if the Meter complains
 ```
 
+`log` takes Readings with the Meter's current Setup and writes them as CSV to standard output, or to a file with
+`-o`. Give `-n` (a number of Readings), `--duration` (seconds) or both; it stops at whichever comes first, and
+keeps the rows already written if it is interrupted or fails:
+
+```bash
+agilent34401a-cli log --simulate -n 100 -o capture.csv
+agilent34401a-cli log --simulate --duration 60 > capture.csv
+```
+
+The window does the same: the Record button (or File → Record to CSV…, or Ctrl+L) streams every Reading to a file
+and the status bar shows `REC` and the file until you stop; File → Export History as CSV… saves the Readings
+the Chart is showing. The columns are `timestamp_iso, elapsed_s, function, range, value, unit, raw, math_mode,
+limit_result`. `value` is in the base unit (volts, ohms, ...), `OVLD` for an Overload, and `raw` is the Meter's own
+text. The file is UTF-8 with LF line endings; Excel needs "From Text/CSV" with UTF-8 to show the Ω unit.
+
 To exercise the real pyvisa stack without a Meter, run the Simulator as a TCP server and point the CLI at it:
 
 ```bash

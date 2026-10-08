@@ -14,7 +14,8 @@ import queue
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 
 from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
@@ -41,6 +42,10 @@ DEFAULT_ERROR_CHECK_INTERVAL_S = 5.0
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 
 
+def _local_now() -> datetime:
+    return datetime.now().astimezone()
+
+
 @dataclass(frozen=True)
 class Connected:
     """The Meter answered `*IDN?` as a 34401A. `setup` is what it was already doing, read back unchanged."""
@@ -59,11 +64,16 @@ class ConnectionFailed:
 
 @dataclass(frozen=True)
 class ReadingTaken:
-    """One Reading arrived. `timestamp` is `time.monotonic()` when it did, `setup` what it was taken under."""
+    """One Reading arrived.
+
+    `timestamp` is `time.monotonic()` when it did, for measuring intervals; `taken_at` is the wall-clock time then
+    (with its UTC offset), for people and CSV files. `setup` is what it was taken under.
+    """
 
     reading: Reading
     timestamp: float
     setup: Setup
+    taken_at: datetime = field(default_factory=_local_now)
 
 
 @dataclass(frozen=True)
@@ -264,7 +274,8 @@ class Worker:
     """Owns the Connection on its own thread and reports through `events`.
 
     While Continuous runs, the Worker looks at the Meter's status byte every `error_check_interval_s` seconds and
-    drains the error queue only if it says there is something in it (ADR-0005). `clock` is replaceable for tests.
+    drains the error queue only if it says there is something in it (ADR-0005). `clock` (monotonic seconds) and
+    `wall_clock` (the time stamped on each Reading) are replaceable for tests.
 
     A reply that is lost or garbled is reported and the Connection resynchronised (see `resync`); after
     `max_consecutive_failures` of those in a row, or as soon as the Meter does not answer the resynchronisation at all,
@@ -278,6 +289,7 @@ class Worker:
         *,
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = _local_now,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
         reading_timeout: Callable[[Setup], float] = reading_timeout,
     ) -> None:
@@ -285,6 +297,7 @@ class Worker:
         self._events = events
         self.error_check_interval_s = error_check_interval_s
         self._clock = clock
+        self._wall_clock = wall_clock
         self._max_consecutive_failures = max_consecutive_failures
         self._timeout_for = reading_timeout
         self._sentinel: Sentinel | None = None
@@ -503,7 +516,7 @@ class Worker:
             self._recover(transport, error)
             return
         self._failures = 0
-        self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup))
+        self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup, self._wall_clock()))
 
     def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:
         try:

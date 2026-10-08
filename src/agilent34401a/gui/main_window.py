@@ -18,6 +18,7 @@ from agilent34401a.gui.chart_tab import install_chart
 from agilent34401a.gui.connection_dialog import ConnectionDialog, Detect, Scan
 from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.console import ConsoleTab
+from agilent34401a.gui.recording import install_recording
 from agilent34401a.gui.sense_tab import SenseTab
 from agilent34401a.gui.shortcuts import Shortcuts
 from agilent34401a.gui.system_tab import SystemTab
@@ -158,6 +159,7 @@ class MainWindow:
         self._setup: Setup | None = None  # what the Meter last reported it is doing
         self._last: ReadingTaken | None = None  # the Reading on the readout
         self._reading_listeners: list[Callable[[ReadingTaken], None]] = []
+        self._close_callbacks: list[Callable[[], None]] = []
         self._tabs: dict[str, tuple[tk.Widget, tk.Widget | None]] = {}  # title -> (tab, widget to focus on show)
 
         root.title(f"Agilent 34401A {__version__}")
@@ -184,8 +186,8 @@ class MainWindow:
         self._build_connection_menu()
         self.notebook = ttk.Notebook(self.root)  # shown by add_tab once there is a tab to show
         self._has_tabs = False
+        self._build_status_bar()  # before the tabs, so a feature can put an indicator in it
         self._build_tabs()
-        self._build_status_bar()
         self._build_view_menu()
         self._layout()
         self._build_shortcuts()
@@ -255,6 +257,7 @@ class MainWindow:
     def _build_tabs(self) -> None:
         """Create the tabs below the controls. Each feature adds its own line here, built in its own module."""
         self.chart = install_chart(self)
+        self.recording = install_recording(self)
         self.sense_tab = SenseTab(self.notebook, self._request)
         self.add_tab("Sense", self.sense_tab.frame)
         self._add_system_tab()
@@ -270,6 +273,24 @@ class MainWindow:
     def add_reading_listener(self, listener: Callable[[ReadingTaken], None]) -> None:
         """Call `listener` with every Reading as it is taken, on the GUI thread. Keep it cheap."""
         self._reading_listeners.append(listener)
+
+    def add_close_callback(self, callback: Callable[[], None]) -> None:
+        """Call `callback` once, on the GUI thread, when the window is closed (before the Worker is shut down)."""
+        self._close_callbacks.append(callback)
+
+    @property
+    def controls(self) -> ttk.Frame:
+        """The row of controls under the Function buttons; the parent for a widget given to `add_control`."""
+        return self._controls
+
+    def add_control(self, widget: tk.Widget, *, compact: bool = False) -> None:
+        """Put `widget` (a child of `controls`) at the end of the controls row, hidden in compact mode unless asked."""
+        self._add_control(widget, {"side": "left", "padx": (12, 0)}, compact=compact)
+
+    @property
+    def status_bar(self) -> ttk.Frame:
+        """The status bar along the bottom; the parent for an indicator a feature adds to it."""
+        return self._status_bar
 
     def _add_system_tab(self) -> None:
         tab = self.system_tab = SystemTab(self.notebook, self._worker)
@@ -377,6 +398,7 @@ class MainWindow:
         for sequence, description in _PLANNED_SHORTCUTS:
             self.shortcuts.plan(sequence, description)
         self.register_shortcut("Ctrl+K", "Open the SCPI console", partial(self.show_tab, CONSOLE_TITLE))
+        self.register_shortcut("Ctrl+L", "Start or stop recording", self.recording.toggle)
         self.add_menu_command("Help", "Shortcuts", self.show_shortcuts)
         self.shortcuts_dialog: tk.Toplevel | None = None
 
@@ -435,6 +457,7 @@ class MainWindow:
     def _build_status_bar(self) -> None:
         status = ttk.Frame(self.root, relief="sunken", padding=(6, 2))
         status.pack(fill="x", side="bottom")
+        self._status_bar = status
         self.status_connection = ttk.Label(status, text="Not connected")
         self.status_identity = ttk.Label(status, text="")
         self.status_terminals = ttk.Label(status, text="")
@@ -575,6 +598,9 @@ class MainWindow:
     def stop(self) -> None:
         """Shut the Worker down and stop polling it, leaving the window itself alone."""
         self._closed = True
+        for callback in self._close_callbacks:
+            callback()
+        self._close_callbacks.clear()
         # Handlers are usually bound methods of this window; dropping them frees the window (and its Tk variables) as
         # soon as the last reference goes, in this thread, rather than whenever the cycle collector runs in another.
         self.shortcuts.clear()

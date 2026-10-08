@@ -14,6 +14,7 @@ from typing import Any
 
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings
+from agilent34401a.serial_config import SerialSettings
 
 _LOG = logging.getLogger(__name__)
 
@@ -168,6 +169,7 @@ class Settings:
                     "resource": connection.connection.resource,
                     "gpib_board": connection.connection.gpib_board,
                     "gpib_address": connection.connection.gpib_address,
+                    "serial": None if connection.connection.serial is None else connection.connection.serial.to_json(),
                 }
             ),
         }
@@ -198,11 +200,13 @@ def _read_connection(data: object) -> LastConnection | None:
         return None
     try:
         resource = data.get("resource")
+        serial = data.get("serial")  # absent in files written before RS-232 was supported
         connection = ConnectionSettings(
             backend=Backend(data["backend"]),
             resource=resource if isinstance(resource, str) else None,
             gpib_board=int(data["gpib_board"]),
             gpib_address=int(data["gpib_address"]),
+            serial=SerialSettings.from_json(serial) if isinstance(serial, dict) else None,
         )
         simulate = data["simulate"]
     except (KeyError, ValueError, TypeError):

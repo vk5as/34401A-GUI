@@ -17,21 +17,40 @@ from typing import TypeVar
 from agilent34401a.backend import Backend, BackendStatus, resolve_backend
 from agilent34401a.connection import BackendScan, ConnectionSettings
 from agilent34401a.errors import BackendUnavailableError
+from agilent34401a.probe import ProbeJob, ProbeProgress, ProbeResult, start_probe
+from agilent34401a.serial_config import (
+    BAUD_RATES,
+    FlowControl,
+    Framing,
+    Parity,
+    SerialSettings,
+    Terminator,
+)
 from agilent34401a.settings import LastConnection
 
 _LOG = logging.getLogger(__name__)
 
 _POLL_MS = 20
 _GPIB_RESOURCE = re.compile(r"GPIB(\d+)::(\d+)::INSTR", re.IGNORECASE)
+_SERIAL_RESOURCE = re.compile(r"ASRL(.+?)(?:::INSTR)?", re.IGNORECASE)
+_AUTOMATIC, _ASSERTED, _UNASSERTED = "Automatic", "Asserted", "Unasserted"
+_LINE_CHOICES = {_AUTOMATIC: None, _ASSERTED: True, _UNASSERTED: False}
+_PROBE_BLOCKED = "Disconnect from the Meter first (File, Disconnect): Probe needs the serial port to itself."
 
 Detect = Callable[[], Mapping[Backend, BackendStatus]]
 """Reports whether each Backend loads here; it may take a moment and runs off the Tk thread."""
 Scan = Callable[[Backend], Mapping[Backend, BackendScan]]
 """Lists the resources the given Backend (every one, for Auto) can see; it runs off the Tk thread."""
+StartProbe = Callable[[SerialSettings, Backend, bool], ProbeJob]
+"""Makes a Probe of the given port through the given Backend, optionally including Flow Control; not yet started."""
 OnConnect = Callable[[LastConnection, bool], None]
 """Receives the Connection the user chose, and whether to reconnect to it at the next start."""
 
 _T = TypeVar("_T")
+
+
+def _always() -> bool:
+    return True
 
 
 def _nobody_is_listening(_choice: LastConnection, _auto_reconnect: bool) -> None:  # noqa: FBT001
@@ -104,10 +123,17 @@ class ConnectionDialog:
         on_connect: OnConnect,
         initial: LastConnection | None = None,
         auto_reconnect: bool = False,
+        probe: StartProbe = start_probe,
+        probe_allowed: Callable[[], bool] = _always,
     ) -> None:
         self._detect = detect
         self._scan = scan
         self._on_connect = on_connect
+        self._start_probe = probe
+        self._probe_allowed = probe_allowed
+        self._job: ProbeJob | None = None
+        self._probe_poll_id: str | None = None
+        self._cancelling = False
         self._statuses: Mapping[Backend, BackendStatus] = {}
         self._detected = False
         self._found: list[tuple[Backend, str]] = []
@@ -132,6 +158,8 @@ class ConnectionDialog:
     def close(self) -> None:
         """Close the dialog without connecting. Safe to call more than once."""
         self._on_connect = _nobody_is_listening  # the window's bound method would keep the window and dialog alive
+        self._probe_allowed = _always
+        self._stop_probe()
         self._background.close()
         if self.is_open:
             self.window.destroy()
@@ -140,6 +168,7 @@ class ConnectionDialog:
         with contextlib.suppress(AttributeError):
             del self._target
             del self.auto_reconnect_var
+            del self.include_flow_var
 
     def _build(self) -> None:
         frame = ttk.Frame(self.window, padding=12)
@@ -150,12 +179,16 @@ class ConnectionDialog:
         targets = ttk.Frame(frame)
         targets.grid(row=0, column=0, columnspan=3, sticky="w")
         self.meter_radio = ttk.Radiobutton(
-            targets, text="Meter", value="meter", variable=self._target, command=self._on_target
+            targets, text="Meter (GPIB)", value="meter", variable=self._target, command=self._on_target
+        )
+        self.serial_radio = ttk.Radiobutton(
+            targets, text="Meter (RS-232)", value="serial", variable=self._target, command=self._on_target
         )
         self.simulator_radio = ttk.Radiobutton(
             targets, text="Simulator", value="simulator", variable=self._target, command=self._on_target
         )
         self.meter_radio.pack(side="left", padx=(0, 12))
+        self.serial_radio.pack(side="left", padx=(0, 12))
         self.simulator_radio.pack(side="left")
 
         ttk.Label(frame, text="Backend").grid(row=1, column=0, sticky="w", pady=(10, 0))
@@ -187,17 +220,19 @@ class ConnectionDialog:
         self.scan_status = ttk.Label(frame, text="", wraplength=420)
         self.scan_status.grid(row=8, column=1, columnspan=2, sticky="w")
 
+        self._build_serial(frame).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+
         self.auto_reconnect_var = tk.BooleanVar(self.window, value=False)
         self.auto_reconnect_check = ttk.Checkbutton(
             frame, text="Reconnect to this Meter when the application starts", variable=self.auto_reconnect_var
         )
-        self.auto_reconnect_check.grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.auto_reconnect_check.grid(row=10, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         self.error_label = ttk.Label(frame, text="", foreground="#b00020", wraplength=420)
-        self.error_label.grid(row=10, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.error_label.grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=11, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        buttons.grid(row=12, column=0, columnspan=3, sticky="e", pady=(10, 0))
         self.cancel_button = ttk.Button(buttons, text="Cancel", command=self.close)
         self.connect_button = ttk.Button(buttons, text="Connect", command=self._on_connect_clicked, default="active")
         self.cancel_button.pack(side="right")
@@ -205,9 +240,57 @@ class ConnectionDialog:
         self.window.bind("<Return>", lambda _event: self.connect_button.invoke())
         self.window.bind("<Escape>", lambda _event: self.cancel_button.invoke())
 
+    def _build_serial(self, parent: ttk.Frame) -> ttk.LabelFrame:
+        """Build the RS-232 section: the serial parameters, and Probe with its progress bar and Cancel."""
+        group = ttk.LabelFrame(parent, text="RS-232", padding=8)
+        group.columnconfigure(1, weight=1)
+        group.columnconfigure(3, weight=1)
+
+        def choice(row: int, column: int, label: str, values: list[str], width: int = 12) -> ttk.Combobox:
+            ttk.Label(group, text=label).grid(row=row, column=column, sticky="w", padx=(0 if column == 0 else 12, 6))
+            box = ttk.Combobox(group, state="readonly", values=values, width=width)
+            box.grid(row=row, column=column + 1, sticky="ew", pady=2)
+            return box
+
+        ttk.Label(group, text="Port").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.port_box = ttk.Combobox(group, values=[])
+        self.port_box.grid(row=0, column=1, columnspan=3, sticky="ew", pady=2)
+        self.baud_box = choice(1, 0, "Baud rate", [str(rate) for rate in BAUD_RATES])
+        self.data_bits_box = choice(1, 2, "Data bits", ["7", "8"])
+        self.parity_box = choice(2, 0, "Parity", [parity.label for parity in Parity])
+        self.stop_bits_box = choice(2, 2, "Stop bits", ["1", "2"])
+        self.flow_box = choice(3, 0, "Flow Control", [flow.label for flow in FlowControl])
+        self.terminator_box = choice(3, 2, "Terminator", [terminator.label for terminator in Terminator])
+        self.dtr_box = choice(4, 0, "DTR line", list(_LINE_CHOICES))
+        self.rts_box = choice(4, 2, "RTS line", list(_LINE_CHOICES))
+
+        probing = ttk.Frame(group)
+        probing.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        probing.columnconfigure(2, weight=1)
+        self.probe_button = ttk.Button(probing, text="Probe", command=self._on_probe)
+        self.probe_button.grid(row=0, column=0, sticky="w")
+        self.probe_cancel_button = ttk.Button(probing, text="Cancel Probe", command=self._on_probe_cancel)
+        self.probe_cancel_button.grid(row=0, column=1, sticky="w", padx=(6, 12))
+        self.include_flow_var = tk.BooleanVar(self.window, value=False)
+        self.include_flow_check = ttk.Checkbutton(
+            probing, text="Include Flow Control (slower)", variable=self.include_flow_var
+        )
+        self.include_flow_check.grid(row=0, column=2, sticky="w")
+        self.probe_progress = ttk.Progressbar(probing, mode="determinate", maximum=1, value=0)
+        self.probe_progress.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.probe_status = ttk.Label(probing, text="", wraplength=420)
+        self.probe_status.grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        return group
+
     def _fill_from(self, initial: LastConnection | None, *, auto_reconnect: bool) -> None:
         settings = initial.connection if initial is not None else ConnectionSettings()
-        self._target.set("simulator" if initial is not None and initial.simulate else "meter")
+        if initial is not None and initial.simulate:
+            target = "simulator"
+        else:
+            target = "meter" if settings.serial is None else "serial"
+        self._target.set(target)
+        self._show_serial(settings.serial if settings.serial is not None else SerialSettings(port="9600"))
+        self.port_box.set("" if settings.serial is None else settings.serial.port)
         self.backend_box.current(list(Backend).index(settings.backend))
         self.board_box.set(str(settings.gpib_board))
         self.address_box.set(str(settings.gpib_address))
@@ -217,12 +300,39 @@ class ConnectionDialog:
         self._on_target()
 
     def _on_target(self) -> None:
-        """Only a Meter needs a Backend, an address and a resource; the Simulator needs none of them."""
-        meter = self._target.get() == "meter"
+        """Only a Meter needs a Backend and a way to find it; the Simulator needs neither.
+
+        A GPIB Meter takes an address or a resource string, an RS-232 Meter a port and its serial parameters.
+        """
+        target = self._target.get()
+        meter = target != "simulator"
+        gpib = target == "meter"
+        serial = target == "serial"
         self.backend_box.configure(state="readonly" if meter else "disabled")
-        for widget in (self.board_box, self.address_box, self.resource_entry, self.scan_button):
-            widget.configure(state="normal" if meter else "disabled")
+        for widget in (self.board_box, self.address_box, self.resource_entry):
+            widget.configure(state="normal" if gpib else "disabled")
+        self.scan_button.configure(state="normal" if meter else "disabled")
         self.resource_list.configure(state="normal" if meter else "disabled")
+        self.port_box.configure(state="normal" if serial else "disabled")
+        for box in (self.baud_box, self.data_bits_box, self.parity_box, self.stop_bits_box):
+            box.configure(state="readonly" if serial else "disabled")
+        for box in (self.flow_box, self.terminator_box, self.dtr_box, self.rts_box):
+            box.configure(state="readonly" if serial else "disabled")
+        self.include_flow_check.configure(state="normal" if serial else "disabled")
+        self.probe_button.configure(state="normal" if serial and self._job is None else "disabled")
+        self.probe_cancel_button.configure(state="normal" if self._job is not None else "disabled")
+
+    def _show_serial(self, serial: SerialSettings) -> None:
+        """Put `serial`'s parameters (everything but the port) in the RS-232 section."""
+        self.baud_box.set(str(serial.baud))
+        self.data_bits_box.set(str(serial.framing.data_bits))
+        self.parity_box.set(serial.framing.parity.label)
+        self.stop_bits_box.set(str(serial.framing.stop_bits))
+        self.flow_box.set(serial.flow_control.label)
+        self.terminator_box.set(serial.terminator.label)
+        lines = {value: label for label, value in _LINE_CHOICES.items()}
+        self.dtr_box.set(lines[serial.dtr])
+        self.rts_box.set(lines[serial.rts])
 
     def _on_detected(self, statuses: Mapping[Backend, BackendStatus]) -> None:
         self._statuses = statuses
@@ -283,6 +393,8 @@ class ConnectionDialog:
         self.resource_list.delete(0, "end")
         for backend, name in found:
             self.resource_list.insert("end", f"{name}  ({backend.label})")
+        ports = [port for _, name in found if (port := _serial_port(name)) is not None]
+        self.port_box.configure(values=list(dict.fromkeys(ports)))
         count = len(found)
         summary = "No resources found." if count == 0 else f"Found {count} resource{'' if count == 1 else 's'}."
         self.scan_status.configure(text=" ".join([summary, *problems]))
@@ -298,6 +410,14 @@ class ConnectionDialog:
         backend, name = self._found[selection[0]]
         self.backend_box.current(list(Backend).index(backend))
         self._show_backend_status()
+        port = _serial_port(name)
+        if port is not None:
+            self._target.set("serial")
+            self._on_target()
+            self.port_box.set(port)
+            return
+        self._target.set("meter")
+        self._on_target()
         self.resource_entry.delete(0, "end")
         gpib = _GPIB_RESOURCE.fullmatch(name)
         if gpib is None:
@@ -309,7 +429,7 @@ class ConnectionDialog:
     def _on_connect_clicked(self) -> None:
         simulate = self._target.get() == "simulator"
         try:
-            settings = self._settings()
+            settings = self._serial_connection() if self._target.get() == "serial" else self._settings()
         except ValueError as error:
             if not simulate:
                 self.error_label.configure(text=str(error))
@@ -335,3 +455,104 @@ class ConnectionDialog:
             gpib_board=board,
             gpib_address=address,
         )
+
+    def _serial_connection(self) -> ConnectionSettings:
+        return ConnectionSettings(backend=self._selected_backend(), serial=self._serial_settings())
+
+    def _serial_settings(self) -> SerialSettings:
+        """Read the RS-232 section; `ValueError` says what is wrong, such as a blank port."""
+        port = self.port_box.get().strip()
+        parity = next(parity for parity in Parity if parity.label == self.parity_box.get())
+        return SerialSettings(
+            port=port,
+            baud=int(self.baud_box.get()),
+            framing=Framing(int(self.data_bits_box.get()), parity, int(self.stop_bits_box.get())),
+            flow_control=next(flow for flow in FlowControl if flow.label == self.flow_box.get()),
+            terminator=next(terminator for terminator in Terminator if terminator.label == self.terminator_box.get()),
+            dtr=_LINE_CHOICES[self.dtr_box.get()],
+            rts=_LINE_CHOICES[self.rts_box.get()],
+        )
+
+    def _on_probe(self) -> None:
+        """Start a Probe of the port on its own thread, which tries the settings the Meter might answer at."""
+        if self._job is not None:
+            return
+        if not self._probe_allowed():
+            self.probe_status.configure(text=_PROBE_BLOCKED)
+            return
+        try:
+            base = self._serial_settings()
+        except ValueError as error:
+            self.probe_status.configure(text=str(error))
+            return
+        try:
+            job = self._start_probe(base, self._selected_backend(), bool(self.include_flow_var.get()))
+            job.start()
+        except Exception as error:  # noqa: BLE001 - whatever goes wrong is shown to the user, never lost
+            _LOG.exception("Could not start the Probe")
+            self.probe_status.configure(text=f"Could not start Probe: {type(error).__name__}: {error}")
+            return
+        self._job = job
+        self._cancelling = False
+        self.probe_progress.configure(value=0, maximum=1)
+        self.probe_status.configure(text="Starting Probe…")
+        self.connect_button.configure(state="disabled")  # Probe has the port until it is done
+        self._on_target()
+        self._probe_poll_id = self.window.after(_POLL_MS, self._poll_probe)
+
+    def _on_probe_cancel(self) -> None:
+        if self._job is None or self._cancelling:
+            return
+        self._cancelling = True
+        self._job.cancel()
+        self.probe_status.configure(text="Cancelling…")
+
+    def _poll_probe(self) -> None:
+        self._probe_poll_id = None
+        job = self._job
+        while job is not None:
+            try:
+                event = job.events.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(event, ProbeResult):
+                self._on_probe_done(event)
+                return
+            self._on_probe_progress(event)
+        if self._job is not None:
+            self._probe_poll_id = self.window.after(_POLL_MS, self._poll_probe)
+
+    def _on_probe_progress(self, progress: ProbeProgress) -> None:
+        if self._cancelling:
+            return
+        self.probe_progress.configure(maximum=progress.total, value=progress.attempt)
+        self.probe_status.configure(text=progress.message)
+
+    def _on_probe_done(self, result: ProbeResult) -> None:
+        self._job = None
+        self._cancelling = False
+        if result.found is not None:
+            self._show_serial(result.found)
+            self.probe_progress.configure(value=result.total)
+        self.probe_status.configure(text=result.message)
+        self.connect_button.configure(state="normal")
+        self._on_target()
+
+    def _stop_probe(self) -> None:
+        """Cancel a Probe still running and stop listening to it (the dialog is closing)."""
+        if self._probe_poll_id is not None:
+            with contextlib.suppress(tk.TclError):  # the whole application may already be gone
+                self.window.after_cancel(self._probe_poll_id)
+            self._probe_poll_id = None
+        if self._job is not None:
+            self._job.cancel()
+            self._job = None
+
+
+def _serial_port(resource: str) -> str | None:
+    """Return the port a scanned `ASRL` resource stands for (`ASRL/dev/ttyUSB0::INSTR` is `/dev/ttyUSB0`), or None."""
+    match = _SERIAL_RESOURCE.fullmatch(resource)
+    if match is None:
+        return None
+    name = match.group(1)
+    return resource if name.isdigit() else name

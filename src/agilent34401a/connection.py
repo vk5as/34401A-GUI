@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from agilent34401a.backend import Backend, BackendStatus, detect_backends, resolve_backend
 from agilent34401a.errors import MeterError
+from agilent34401a.serial_config import SerialSettings
 from agilent34401a.transport import Transport
 
 _DEFAULT_GPIB_ADDRESS = 22
@@ -13,14 +14,19 @@ _MAX_GPIB_ADDRESS = 30
 
 @dataclass(frozen=True)
 class ConnectionSettings:
-    """Everything needed to open a Connection to a Meter over GPIB, or over any raw VISA resource."""
+    """Everything needed to open a Connection to a Meter over GPIB, RS-232, or any raw VISA resource."""
 
     backend: Backend = Backend.AUTO
     resource: str | None = None
     gpib_board: int = 0
     gpib_address: int = _DEFAULT_GPIB_ADDRESS
+    serial: SerialSettings | None = None
+    """When set, the Meter is on this RS-232 port instead of on GPIB."""
 
     def __post_init__(self) -> None:
+        if self.resource is not None and self.serial is not None:
+            message = "A raw VISA resource string cannot be combined with serial settings"
+            raise ValueError(message)
         if self.resource is not None and not self.resource.strip():
             message = "The VISA resource string cannot be blank"
             raise ValueError(message)
@@ -33,14 +39,17 @@ class ConnectionSettings:
 
     @property
     def resource_name(self) -> str:
-        """The VISA resource to open: the raw string if one was given, otherwise the GPIB board and address."""
+        """The VISA resource to open: the raw string if one was given, else the serial port, else GPIB."""
         if self.resource is not None:
             return self.resource
+        if self.serial is not None:
+            return self.serial.resource_name
         return f"GPIB{self.gpib_board}::{self.gpib_address}::INSTR"
 
 
 DetectBackends = Callable[[Backend], Mapping[Backend, BackendStatus]]
 OpenVisa = Callable[[str, str], Transport]
+OpenSerial = Callable[[str, SerialSettings], Transport]
 
 
 def open_transport(
@@ -48,18 +57,23 @@ def open_transport(
     *,
     detect: DetectBackends | None = None,
     open_visa: OpenVisa | None = None,
+    open_serial: OpenSerial | None = None,
 ) -> Transport:
     """Open a Connection to the Meter described by `settings`.
 
-    `detect` and `open_visa` are the seams tests replace to avoid needing VISA installed; they default to pyvisa.
+    `detect`, `open_visa` and `open_serial` are the seams tests replace to avoid needing VISA installed; they
+    default to pyvisa. A serial Connection is opened by `open_serial`, which also applies the serial settings.
     """
-    if detect is None or open_visa is None:
+    if detect is None or open_visa is None or open_serial is None:
         # Imported here so that nothing needs pyvisa until a real Connection is wanted.
         from agilent34401a import visa  # noqa: PLC0415
 
         detect = detect or (lambda requested: detect_backends(visa.check_library, requested))
         open_visa = open_visa or visa.open_visa_transport
+        open_serial = open_serial or visa.open_serial_transport
     backend = resolve_backend(settings.backend, detect(settings.backend))
+    if settings.serial is not None:
+        return open_serial(backend.library, settings.serial)
     return open_visa(backend.library, settings.resource_name)
 
 

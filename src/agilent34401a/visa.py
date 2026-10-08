@@ -1,6 +1,7 @@
 """The typed boundary around pyvisa (ADR-0007): nothing else in the package imports it."""
 
 import contextlib
+import time
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,14 +10,18 @@ from typing import Protocol
 import pyvisa
 from pyvisa import constants
 from pyvisa.errors import VisaIOError
-from pyvisa.resources import MessageBasedResource
+from pyvisa.resources import MessageBasedResource, SerialInstrument
 
 from agilent34401a.backend import BackendStatus
 from agilent34401a.errors import BackendUnavailableError, TransportError, TransportTimeoutError
+from agilent34401a.serial_config import FlowControl, Parity, SerialSettings
 
 _DEFAULT_TIMEOUT_S = 2.0
 _MS_PER_S = 1000
 _TERMINATION = "\n"
+_BREAK_S = 0.05
+_REMOTE = "SYST:REM"
+_LOCAL = "SYST:LOC"
 _VENDOR_HINT = "Install Keysight IO Libraries Suite (or NI-VISA) to use this Backend."
 
 
@@ -32,6 +37,55 @@ class _Resource(Protocol):
     def clear(self) -> None: ...
 
     def close(self) -> None: ...
+
+
+class _SerialResource(_Resource, Protocol):
+    """The part of a pyvisa serial resource that `apply_serial_settings` sets."""
+
+    baud_rate: int
+    data_bits: int
+    parity: constants.Parity
+    stop_bits: constants.StopBits
+    flow_control: constants.ControlFlow
+    read_termination: str | None
+    write_termination: str
+
+    def set_visa_attribute(self, name: constants.ResourceAttribute, state: object) -> object: ...
+
+
+_PARITY = {Parity.NONE: constants.Parity.none, Parity.EVEN: constants.Parity.even, Parity.ODD: constants.Parity.odd}
+_FLOW_CONTROL = {
+    FlowControl.NONE: constants.ControlFlow.none,
+    FlowControl.XON_XOFF: constants.ControlFlow.xon_xoff,
+    FlowControl.RTS_CTS: constants.ControlFlow.rts_cts,
+    FlowControl.DTR_DSR: constants.ControlFlow.dtr_dsr,
+}
+
+
+_STOP_BITS = {1: constants.StopBits.one, 2: constants.StopBits.two}
+
+
+def _line(*, asserted: bool) -> constants.LineState:
+    return constants.LineState.asserted if asserted else constants.LineState.unasserted
+
+
+def apply_serial_settings(resource: _SerialResource, settings: SerialSettings) -> None:
+    """Configure an open serial `resource`: baud rate, Framing, Flow Control, terminators and manual DTR/RTS.
+
+    The Meter ends every reply with CR LF, so replies are read up to LF and the CR is stripped by the Transport;
+    `settings.terminator` is what goes after each command.
+    """
+    resource.baud_rate = settings.baud
+    resource.data_bits = settings.framing.data_bits
+    resource.parity = _PARITY[settings.framing.parity]
+    resource.stop_bits = _STOP_BITS[settings.framing.stop_bits]
+    resource.flow_control = _FLOW_CONTROL[settings.flow_control]
+    resource.read_termination = _TERMINATION
+    resource.write_termination = settings.terminator.text
+    if settings.dtr is not None:
+        resource.set_visa_attribute(constants.ResourceAttribute.asrl_dtr_state, _line(asserted=settings.dtr))
+    if settings.rts is not None:
+        resource.set_visa_attribute(constants.ResourceAttribute.asrl_rts_state, _line(asserted=settings.rts))
 
 
 class _Manager(Protocol):
@@ -59,10 +113,11 @@ def _visa_errors() -> Iterator[None]:
 class VisaTransport:
     """A Transport over one open pyvisa resource. It owns the resource and its manager."""
 
-    def __init__(self, resource: _Resource, manager: _Manager, *, gpib: bool = False) -> None:
+    def __init__(self, resource: _Resource, manager: _Manager, *, gpib: bool = False, serial: bool = False) -> None:
         self._resource = resource
         self._manager = manager
         self._gpib = gpib
+        self._serial = serial
         self._closed = False
         self.timeout = _DEFAULT_TIMEOUT_S
 
@@ -90,16 +145,38 @@ class VisaTransport:
         return self.read()
 
     def clear(self) -> None:
+        """Device clear: flush the buffers (GPIB: the bus message). RS-232 also sends a serial break."""
         self._require_open()
         with _visa_errors():
             self._resource.clear()
+            if self._serial:
+                self._send_break()
+
+    def _send_break(self) -> None:
+        set_attribute = getattr(self._resource, "set_visa_attribute", None)
+        if not callable(set_attribute):
+            return
+        set_attribute(constants.ResourceAttribute.asrl_break_state, constants.LineState.asserted)
+        try:
+            time.sleep(_BREAK_S)
+        finally:
+            set_attribute(constants.ResourceAttribute.asrl_break_state, constants.LineState.unasserted)
+
+    def go_to_remote(self) -> None:
+        """Put an RS-232 Meter in Remote with `SYST:REM`; GPIB's REN line does that when the port opens."""
+        self._require_open()
+        if self._serial:
+            self.write(_REMOTE)
 
     def go_to_local(self) -> None:
-        """Address a GPIB Meter to Local (the REN line's go-to-local); other buses have no REN line, so nothing.
+        """Return the Meter to Local: GPIB addresses it with the REN line's go-to-local, RS-232 sends `SYST:LOC`.
 
-        RS-232 returns to Local with a command instead; that arrives with the RS-232 Connection (issue #7).
+        Other buses have no way to, so nothing.
         """
         self._require_open()
+        if self._serial:
+            self.write(_LOCAL)
+            return
         control_ren = getattr(self._resource, "control_ren", None)
         if self._gpib and callable(control_ren):
             with _visa_errors():
@@ -156,6 +233,17 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
 
     pyvisa-py connects TCP sockets lazily, so a refused connection shows on the first command, not here.
     """
+    return _open(library, resource_name, gpib=resource_name.upper().startswith("GPIB"))
+
+
+def open_serial_transport(library: str, settings: SerialSettings) -> VisaTransport:
+    """Open the RS-232 port `settings` names through the VISA implementation `library`, configured as asked."""
+    return _open(library, settings.resource_name, serial=settings)
+
+
+def _open(
+    library: str, resource_name: str, *, gpib: bool = False, serial: SerialSettings | None = None
+) -> VisaTransport:
     try:
         manager = pyvisa.ResourceManager(library)
     except Exception as error:
@@ -167,8 +255,11 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
         if not isinstance(resource, MessageBasedResource):
             message = f"{resource_name} does not take text commands"
             raise TransportError(message)  # noqa: TRY301 - cleaned up by the handler below
-        resource.read_termination = _TERMINATION
-        resource.write_termination = _TERMINATION
+        if serial is None:
+            resource.read_termination = _TERMINATION
+            resource.write_termination = _TERMINATION
+        else:
+            _configure_serial(resource, resource_name, serial)
     except TransportError:
         _release(resource, manager)
         raise
@@ -176,7 +267,14 @@ def open_visa_transport(library: str, resource_name: str) -> VisaTransport:
         _release(resource, manager)
         message = f"Could not open {resource_name}: {error}"
         raise TransportError(message) from error
-    return VisaTransport(resource, manager, gpib=resource_name.upper().startswith("GPIB"))
+    return VisaTransport(resource, manager, gpib=gpib, serial=serial is not None)
+
+
+def _configure_serial(resource: MessageBasedResource, resource_name: str, settings: SerialSettings) -> None:
+    if not isinstance(resource, SerialInstrument):
+        message = f"{resource_name} is not a serial port"
+        raise TransportError(message)
+    apply_serial_settings(resource, settings)
 
 
 def list_resources(library: str) -> list[str]:

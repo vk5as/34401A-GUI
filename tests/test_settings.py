@@ -5,6 +5,7 @@ import pytest
 
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings
+from agilent34401a.serial_config import FlowControl, Framing, Parity, SerialSettings, Terminator
 from agilent34401a.settings import SETTINGS_FILE, LastConnection, Settings, Theme, XAxis, config_dir
 
 
@@ -202,3 +203,41 @@ def test_a_failed_save_raises_and_leaves_no_temporary_file(tmp_path):
         settings.save()
 
     assert [path.name for path in tmp_path.iterdir()] == [SETTINGS_FILE]
+
+
+def test_the_serial_settings_of_the_remembered_connection_survive_a_restart(tmp_path):
+    settings = Settings.load(tmp_path)
+    serial = SerialSettings(
+        port="/dev/ttyUSB1",
+        baud=2400,
+        framing=Framing(7, Parity.ODD, 1),
+        flow_control=FlowControl.RTS_CTS,
+        terminator=Terminator.CRLF,
+        dtr=True,
+        rts=False,
+    )
+    settings.last_connection = LastConnection(simulate=False, connection=ConnectionSettings(serial=serial))
+
+    settings.save()
+
+    assert Settings.load(tmp_path).last_connection == settings.last_connection
+
+
+def test_serial_settings_that_cannot_be_read_back_leave_no_remembered_connection(tmp_path):
+    (tmp_path / SETTINGS_FILE).write_text(
+        json.dumps(
+            {
+                "last_connection": {
+                    "simulate": False,
+                    "backend": "py",
+                    "resource": None,
+                    "gpib_board": 0,
+                    "gpib_address": 22,
+                    "serial": {"port": "COM1", "baud": 1234},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert Settings.load(tmp_path).last_connection is None

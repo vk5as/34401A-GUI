@@ -664,6 +664,18 @@ def test_the_simulator_is_in_local_until_it_is_commanded_and_goes_remote_on_the_
     assert _is_remote(simulator)
 
 
+def test_the_local_command_returns_the_simulator_to_local_and_the_remote_command_to_remote():
+    simulator = Simulator()
+    simulator.write("SYST:REM")
+    assert _is_remote(simulator)
+
+    simulator.write("SYST:LOC")
+    assert not _is_remote(simulator)
+
+    simulator.write("SYST:REM")
+    assert _is_remote(simulator)
+
+
 def test_going_to_local_returns_the_simulator_to_local_without_touching_its_setup():
     simulator = Simulator()
     simulator.write('FUNC "RES"')

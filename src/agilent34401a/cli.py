@@ -4,17 +4,18 @@ import argparse
 import math
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from functools import partial
 from pathlib import Path
 
-from agilent34401a import __version__, cli_admin, cli_log, cli_raw
+from agilent34401a import __version__, cli_admin, cli_log, cli_raw, cli_serial
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings, open_transport
 from agilent34401a.driver import Driver, QueuedError
 from agilent34401a.errors import InvalidSetupError, MeterError
 from agilent34401a.meter import Function, Resolution, Setup, format_reading, reading_timeout
 from agilent34401a.sim import Simulator
-from agilent34401a.transport import Transport
+from agilent34401a.transport import LocalControl, RemoteControl, Transport
 
 _PROG = "agilent34401a-cli"
 _USAGE_ERROR = 2
@@ -47,6 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_raw_command(subparsers)
     _add_log_command(subparsers)
     _add_admin_commands(subparsers)
+    _add_probe_command(subparsers)
 
     args = parser.parse_args(argv)
     handler: Callable[[argparse.Namespace], int] | None = getattr(args, "handler", None)
@@ -70,6 +72,7 @@ def add_connection_options(parser: argparse.ArgumentParser) -> None:
     connection.add_argument("--gpib-board", type=int, help="the GPIB board index (default 0)")
     connection.add_argument("--gpib-address", type=int, help="the Meter's GPIB address (default 22)")
     connection.add_argument("--resource", help="a raw VISA resource string, instead of the GPIB board and address")
+    cli_serial.add_serial_options(parser)
 
 
 def add_command(
@@ -98,6 +101,8 @@ def run_on_meter(args: argparse.Namespace, action: Callable[[Driver, Transport],
         sys.stderr.write(f"{_PROG}: error: {error}\n")
         return 1
     try:
+        if isinstance(transport, RemoteControl):
+            transport.go_to_remote()  # RS-232 only listens to a Meter that has been told it is Remote
         driver = Driver(transport)
         driver.identify()
         return action(driver, transport)
@@ -105,6 +110,15 @@ def run_on_meter(args: argparse.Namespace, action: Callable[[Driver, Transport],
         sys.stderr.write(f"{_PROG}: error: {error}\n")
         return 1
     finally:
+        _release(transport)
+
+
+def _release(transport: Transport) -> None:
+    """Give the Meter back to its front panel (ADR-0004) and close the Transport; neither may fail the exit."""
+    with suppress(MeterError):
+        if isinstance(transport, LocalControl):
+            transport.go_to_local()
+    with suppress(MeterError):
         transport.close()
 
 
@@ -258,17 +272,22 @@ def connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParse
         "--gpib-board": args.gpib_board,
         "--gpib-address": args.gpib_address,
         "--resource": args.resource,
+        "--serial-port": args.serial_port,
     }
-    given = [name for name, value in chosen.items() if value is not None]
+    given = [name for name, value in chosen.items() if value is not None] + cli_serial.serial_options_given(args)
     if args.simulate:
         if given:
             parser.error(f"--simulate cannot be combined with {', '.join(given)}")
         return None
     if args.resource is not None and ("--gpib-board" in given or "--gpib-address" in given):
         parser.error("--resource cannot be combined with --gpib-board or --gpib-address")
+    serial = cli_serial.serial_settings(args, parser)
+    if serial is not None and given_bus_options(given):
+        parser.error(f"--serial-port cannot be combined with {', '.join(given_bus_options(given))}")
     defaults = ConnectionSettings()
     try:
         return ConnectionSettings(
+            serial=serial,
             backend=defaults.backend if args.backend is None else Backend(args.backend),
             resource=args.resource,
             gpib_board=defaults.gpib_board if args.gpib_board is None else args.gpib_board,
@@ -276,6 +295,26 @@ def connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParse
         )
     except ValueError as error:
         parser.error(str(error))
+
+
+def given_bus_options(given: list[str]) -> list[str]:
+    """Pick the GPIB and raw-resource options out of the options given, which an RS-232 Connection cannot have."""
+    return [name for name in given if name in {"--resource", "--gpib-board", "--gpib-address"}]
+
+
+def _add_probe_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "probe",
+        cli_serial.run_probe,
+        summary="find the RS-232 settings the Meter answers at",
+        description=(
+            "Probe a serial port: try every baud rate and Framing (and with --include-flow-control, every Flow "
+            "Control) until the Meter answers *IDN?, and print the options that work. Ctrl-C cancels. "
+            "Exit code 0 means a Meter was found."
+        ),
+    )
+    cli_serial.add_probe_options(parser)
 
 
 def _parse_range(text: str | None, parser: argparse.ArgumentParser) -> float | str | None:

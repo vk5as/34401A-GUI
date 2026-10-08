@@ -13,6 +13,10 @@ class TransportTimeoutError(TransportError):
     """The Meter did not answer within the Transport's timeout."""
 
 
+class ResyncFailedError(TransportError):
+    """The Meter did not answer when the Connection was resynchronised, so it is not in step and cannot be brought back."""
+
+
 class BackendUnavailableError(TransportError):
     """The VISA Backend asked for cannot be used, or no Backend can."""
 

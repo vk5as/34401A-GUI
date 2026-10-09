@@ -11,8 +11,9 @@ import re
 import threading
 import tkinter as tk
 from collections.abc import Callable, Mapping
+from functools import partial
 from tkinter import ttk
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from agilent34401a.backend import Backend, BackendStatus, resolve_backend
 from agilent34401a.connection import BackendScan, ConnectionSettings
@@ -58,35 +59,48 @@ def _nobody_is_listening(_choice: LastConnection, _auto_reconnect: bool) -> None
 
 
 class _Background:
-    """Runs functions on helper threads and hands their outcomes back to the Tk thread."""
+    """Runs functions on helper threads and hands their outcomes back to the Tk thread.
+
+    A helper thread never holds the callbacks that answer (they are the dialog's bound methods): it only holds a
+    number, and the callbacks wait here until the Tk thread collects them, or `close` drops them on the Tk thread.
+    Otherwise the last reference to a closed dialog could be dropped by a helper thread that finishes late, and the
+    dialog's Tk variables would be finalised on the wrong thread (ADR-0008).
+    """
 
     def __init__(self, root: tk.Misc) -> None:
         self._root = root
-        self._outcomes: queue.Queue[Callable[[], None]] = queue.Queue()
-        self._pending = 0  # helper threads whose outcome has not been handed back yet
+        self._outcomes: queue.Queue[tuple[int, bool, object]] = queue.Queue()  # (job, worked, result or message)
+        self._callbacks: dict[int, tuple[Callable[[Any], None], Callable[[str], None]]] = {}
+        self._jobs = 0
         self._poll_id: str | None = None
         self._closed = False
 
     def run(self, work: Callable[[], _T], done: Callable[[_T], None], failed: Callable[[str], None]) -> None:
+        """Run `work` on a helper thread, then call `done` with its result or `failed` with why it failed, on Tk's thread.
+
+        `work` runs on the helper thread, so it must not hold the dialog.
+        """
+        self._jobs += 1
+        job = self._jobs
+        self._callbacks[job] = (done, failed)
+        outcomes = self._outcomes
+
         def main() -> None:
             try:
                 result = work()
             except Exception as error:  # noqa: BLE001 - whatever goes wrong is shown to the user, never lost
                 _LOG.exception("A connection dialog lookup failed")
-                message = f"{type(error).__name__}: {error}"
-                outcome = lambda: failed(message)  # noqa: E731 - bound now, run later on the Tk thread
+                outcomes.put((job, False, f"{type(error).__name__}: {error}"))
             else:
-                outcome = lambda: done(result)  # noqa: E731
-            if not self._closed:  # nobody is left to hear the answer, and keeping it would keep the dialog alive
-                self._outcomes.put(outcome)
+                outcomes.put((job, True, result))
 
-        self._pending += 1
         threading.Thread(target=main, name="agilent34401a-lookup", daemon=True).start()
         if self._poll_id is None:
             self._poll_id = self._root.after(_POLL_MS, self._poll)
 
     def close(self) -> None:
         self._closed = True
+        self._callbacks.clear()
         while not self._outcomes.empty():
             self._outcomes.get_nowait()
         if self._poll_id is not None:
@@ -98,12 +112,15 @@ class _Background:
         self._poll_id = None
         while not self._closed:
             try:
-                outcome = self._outcomes.get_nowait()
+                job, worked, payload = self._outcomes.get_nowait()
             except queue.Empty:
                 break
-            self._pending -= 1
-            outcome()
-        if not self._closed and self._pending > 0:
+            done, failed = self._callbacks.pop(job)
+            if worked:
+                done(payload)
+            else:
+                failed(str(payload))
+        if not self._closed and self._callbacks:
             self._poll_id = self._root.after(_POLL_MS, self._poll)
 
 
@@ -379,7 +396,7 @@ class ConnectionDialog:
         self.scan_button.configure(state="disabled")
         self.scan_status.configure(text="Scanning…")
         backend = self._selected_backend()
-        self._background.run(lambda: self._scan(backend), self._on_scanned, self._on_scan_failed)
+        self._background.run(partial(self._scan, backend), self._on_scanned, self._on_scan_failed)
 
     def _on_scanned(self, scans: Mapping[Backend, BackendScan]) -> None:
         self.scan_button.configure(state="normal")

@@ -1,6 +1,5 @@
 import _tkinter
 import gc
-import os
 import re
 import threading
 import time
@@ -695,19 +694,15 @@ def test_the_window_manager_close_button_closes_the_window_cleanly(make_window):
     assert window.worker_is_alive() is False
 
 
+@pytest.mark.usefixtures("tk_root")
 def test_running_the_app_with_simulate_shows_a_window_and_returns_success_when_it_is_closed(monkeypatch):
+    # `main` makes the application's own root, as it must; `tk_root` is here to skip when there is no display.
     shown_titles = []
 
     def close_immediately(self, _n=0):
         shown_titles.append(self.title())
         self.destroy()
 
-    try:
-        tk.Tk().destroy()
-    except tk.TclError:
-        if os.environ.get("CI"):
-            raise
-        pytest.skip("no display available")
     monkeypatch.setattr(tk.Tk, "mainloop", close_immediately)
 
     assert main(["--simulate"]) == 0
@@ -1256,19 +1251,15 @@ def test_the_window_leaves_the_collector_alone_while_automatic_collection_is_on(
     assert collections == []
 
 
+@pytest.mark.usefixtures("tk_root")
 def test_running_the_app_turns_automatic_collection_off_for_the_life_of_the_window_only(monkeypatch):
+    # `main` makes the application's own root, as it must; `tk_root` is here to skip when there is no display.
     seen = []
 
     def run_and_note(self, _n=0):
         seen.append(gc.isenabled())
         self.destroy()
 
-    try:
-        tk.Tk().destroy()
-    except tk.TclError:
-        if os.environ.get("CI"):
-            raise
-        pytest.skip("no display available")
     monkeypatch.setattr(tk.Tk, "mainloop", run_and_note)
     was_enabled = gc.isenabled()
     gc.enable()

@@ -52,6 +52,7 @@ dev = [
     "pre-commit>=3.7",
     "pytest>=8",
     "pytest-cov>=5",
+    "pytest-timeout>=2.3",
     "ruff>=0.16,<0.17",
     "twine>=5",
 ]
@@ -139,6 +140,11 @@ minversion = "8"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config --cov --cov-report=term-missing"
 filterwarnings = ["error"]
+# A hang must fail the job in minutes with every thread's stack, not block it for an hour. The slowest test takes a
+# few seconds; "thread" works on Windows too (it dumps all stacks, then ends the process).
+timeout = 180
+timeout_method = "thread"
+faulthandler_timeout = 120
 
 [tool.coverage.run]
 source = ["agilent34401a"]

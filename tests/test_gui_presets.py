@@ -13,7 +13,7 @@ from agilent34401a.preset_store import PRESETS_FILE, Collision, PresetStore
 from agilent34401a.settings import Settings
 from agilent34401a.sim import Simulator
 from agilent34401a.trigger import TriggerSettings, TriggerSource
-from tests.test_gui_app import CountingSimulator, choose, connected, pump, pump_for
+from tests.test_gui_app import CountingSimulator, choose, connected, handled_everything_sent_so_far, pump, pump_for
 
 NOT_CONNECTED = "Connect to a Meter first"
 
@@ -64,7 +64,7 @@ def pause(window: MainWindow) -> None:
     pump(window, lambda: ready(window))
     if window.run_button.cget("text") == "Pause":
         window.run_button.invoke()
-    pump_for(window, 0.05)
+    handled_everything_sent_so_far(window)  # the Worker finishes the Reading in progress before it pauses
 
 
 def setup_of(window: MainWindow) -> Setup:

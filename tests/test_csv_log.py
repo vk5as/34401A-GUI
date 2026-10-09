@@ -71,12 +71,19 @@ def test_the_raw_reading_is_written_exactly_as_the_meter_sent_it_without_the_lin
     assert row[COLUMNS.index("raw")] == "+1.50000000E+00"
 
 
-def test_an_overload_reading_has_ovld_for_a_value_and_keeps_the_raw_reading():
+def test_an_overload_reading_has_the_meters_own_number_for_a_value_and_keeps_the_raw_reading():
     row = csv_row(logged(parse_reading(OVERLOAD, Function.DC_VOLTAGE)))
 
-    assert row[COLUMNS.index("value")] == "OVLD"
+    assert float(row[COLUMNS.index("value")]) == 9.9e37
     assert row[COLUMNS.index("raw")] == OVERLOAD
     assert row[COLUMNS.index("unit")] == "V"
+
+
+def test_a_negative_overload_keeps_its_sign_in_the_value_column():
+    row = csv_row(logged(parse_reading("-9.90000000E+37", Function.DC_VOLTAGE)))
+
+    assert float(row[COLUMNS.index("value")]) == -9.9e37
+    assert row[COLUMNS.index("raw")] == "-9.90000000E+37"
 
 
 @pytest.mark.parametrize(

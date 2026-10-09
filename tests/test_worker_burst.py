@@ -20,6 +20,7 @@ from agilent34401a.worker import (
     Disconnected,
     ErrorsReported,
     Event,
+    RawReplied,
     ReadingTaken,
     SetupChanged,
     Worker,
@@ -88,6 +89,18 @@ def next_event(events: "queue.Queue[Event]") -> Event:
     return events.get(timeout=TIMEOUT_S)
 
 
+def settled(worker: Worker, events: "queue.Queue[Event]") -> None:
+    """Prove the Worker has acted on every request sent before this and put out every event they led to.
+
+    Requests are served in order, so the answer to a raw query sent now comes after everything earlier requests
+    produced: if nothing but that answer arrives, nothing else was going to. (No sleeping and hoping.)
+    """
+    worker.send_raw("*IDN?")
+    marker = next_event(events)
+    assert isinstance(marker, RawReplied)
+    assert marker.command == "*IDN?"
+
+
 def until(events: "queue.Queue[Event]", kind: type) -> list[Event]:
     """Collect events up to and including the first of type `kind`."""
     collected = []
@@ -114,8 +127,7 @@ def test_single_takes_exactly_one_reading_and_then_waits(started):
     taken = next_event(events)
     assert isinstance(taken, ReadingTaken)
     assert taken.reading.value == 2.5
-    time.sleep(0.05)
-    assert events.empty()
+    settled(worker, events)
     assert simulator.reads == 1
 
 
@@ -189,9 +201,8 @@ def test_a_burst_larger_than_reading_memory_is_refused_before_anything_is_sent(s
     with pytest.raises(BurstTooLargeError):
         worker.start_burst(burst(100, 6))
 
-    time.sleep(0.05)
-    assert events.empty()
-    assert simulator.writes[sent:] == []
+    settled(worker, events)
+    assert [command for command in simulator.writes[sent:] if command != "*IDN?"] == []
 
 
 def test_a_burst_waits_for_operation_complete_with_a_timeout_sized_from_the_setup(started):
@@ -244,7 +255,7 @@ def test_starting_a_burst_pauses_continuous_readings(started):
     worker.start_burst(burst(3))
     until(events, BurstFinished)
     reads = simulator.reads
-    time.sleep(0.05)
+    settled(worker, events)  # a Worker that went back to Continuous would have put a Reading before the marker
 
     assert simulator.reads == reads
 
@@ -334,7 +345,13 @@ def test_a_setup_change_asked_for_during_a_burst_is_made_after_it(started):
     assert isinstance(next_event(events), BurstStarted)
 
     worker.apply_setup(Setup.default(Function.DC_VOLTAGE).with_nplc(1))
-    time.sleep(0.05)
+    # The Worker polls the status byte while it waits, looking at its requests between polls: a few more polls prove it
+    # has seen the request and left it for after the Burst.
+    polls = simulator.status_polls
+    deadline = time.monotonic() + TIMEOUT_S
+    while simulator.status_polls < polls + 3 and time.monotonic() < deadline:
+        time.sleep(0.002)
+    assert simulator.status_polls >= polls + 3
     assert events.empty()
     worker.cancel_burst()
 

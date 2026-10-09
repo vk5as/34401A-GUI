@@ -183,7 +183,8 @@ The **View** menu has:
 
 - **Theme**: Light, Dark or System. Light and Dark are built on ttk's `clam` theme, which renders the same on
   Windows and Linux. System uses the platform's native ttk theme as it is. The choice is remembered.
-- **Compact mode**: only the readout, the Function buttons and the Range are left, and the window shrinks to fit. Also
+- **Compact mode**: only the readout, the Function buttons, Run/Pause and the Range, Resolution and Integration Time
+  controls are left (the setup line, Raw Reading and the tabs are hidden), and the window shrinks to fit. Also
   remembered.
 
 | Light | Dark |
@@ -192,7 +193,7 @@ The **View** menu has:
 
 | System | Compact mode |
 |---|---|
-| ![System theme, the platform's native ttk look](docs/images/theme_system.png) | ![Compact mode, only the readout, Function buttons and Range](docs/images/compact_mode.png) |
+| ![System theme, the platform's native ttk look](docs/images/theme_system.png) | ![Compact mode, the readout, Function buttons, Run/Pause and the Range, Resolution and Integration Time controls](docs/images/compact_mode.png) |
 
 ### Keyboard shortcuts
 
@@ -264,7 +265,11 @@ agilent34401a-cli raw --simulate "VOLT:DC:NPLC 10"        # a command: no reply,
 
 `log` takes Readings with the Meter's current Setup and writes them as CSV to standard output, or to a file with
 `-o`. Give `-n` (a number of Readings), `--duration` (seconds) or both; it stops at whichever comes first, and
-keeps the rows already written if it is interrupted or fails:
+keeps the rows already written if it is interrupted or fails. A Reading that is lost (a garbled or missing reply) is
+a warning on standard error, not the end: the log resynchronises the Connection and carries on, a lost Reading is not
+a row (so `-n 100` still ends with 100), and the exit code is 0 when the log completed. If 5 Readings in a row are lost,
+or the Meter does not answer the resynchronisation, the Meter is taken to be gone and `log` stops with an error and
+exit code 1:
 
 ```bash
 agilent34401a-cli log --simulate -n 100 -o capture.csv
@@ -326,8 +331,9 @@ asserted, so use a slower baud rate if characters are lost.
 The window records Readings to a file: the Record button (or File → Record to CSV…, or Ctrl+L) streams every Reading
 to a file and the status bar shows `REC` and the file until you stop; File → Export History as CSV… saves the Readings
 the Chart is showing. The columns are `timestamp_iso, elapsed_s, function, range, value, unit, raw, math_mode,
-limit_result`. `value` is in the base unit (volts, ohms, ...), `OVLD` for an Overload, and `raw` is the Meter's own
-text. The file is UTF-8 with LF line endings; Excel needs "From Text/CSV" with UTF-8 to show the Ω unit.
+limit_result`. `value` is in the base unit (volts, ohms, ...); for an Overload it is the Meter's own number, `9.9e+37` or `-9.9e+37`
+(the window shows OVLD, the CSV keeps the column numeric). `raw` is the Meter's own text. The file is UTF-8 with LF line
+endings; Excel needs "From Text/CSV" with UTF-8 to show the Ω unit.
 `math_mode` is the Math Operation in effect (`NULL`, `DB`, `DBM`, `STATS` or `LIMIT`; empty for none) and
 `limit_result` is `HI`, `LO` or `PASS` during a Limit Test. Under Null `value` is the Reading minus the offset, and
 under dB or dBm it is in dB or dBm, which `unit` says. The command line's `log` writes the same columns.

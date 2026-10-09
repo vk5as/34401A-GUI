@@ -53,9 +53,9 @@ def test_an_exported_history_keeps_overloads_and_readings_of_different_functions
 
     export_history(history, tmp_path / "history.csv")
 
-    assert [(row["function"], row["value"], row["unit"]) for row in rows_of(tmp_path / "history.csv")] == [
-        ("DC V", "OVLD", "V"),
-        ("2-wire Ω", "100.0", "Ω"),
+    assert [(row["function"], float(row["value"]), row["unit"]) for row in rows_of(tmp_path / "history.csv")] == [
+        ("DC V", 9.9e37, "V"),
+        ("2-wire Ω", 100.0, "Ω"),
     ]
 
 

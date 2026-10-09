@@ -56,6 +56,20 @@ class RecordingSimulator(Simulator):
         return [command for command in self.commands if not command.endswith("?")]
 
 
+class LongestStall:
+    """Call `tick()` once per turn of a pump loop; `longest` is then the longest time one turn took."""
+
+    def __init__(self) -> None:
+        self.longest = 0.0
+        self._last = time.monotonic()
+
+    def tick(self) -> bool:
+        now = time.monotonic()
+        self.longest = max(self.longest, now - self._last)
+        self._last = now
+        return False
+
+
 class Meters:
     """Hands out one prepared Simulator per Connection and remembers what it was asked to connect to."""
 
@@ -211,7 +225,7 @@ def test_disconnecting_does_not_wait_for_a_reading_that_is_still_in_progress(mak
     began = time.monotonic()
     window.disconnect()
     window.root.update()
-    assert time.monotonic() - began < 0.25
+    assert time.monotonic() - began < 1.0  # the Reading is held until `release`, which is far longer
     assert status(window) == "Disconnecting…"
 
     release.set()
@@ -539,10 +553,14 @@ def test_the_real_opener_reports_a_socket_nobody_listens_on_without_freezing(mak
         connection=ConnectionSettings(backend=Backend.PYVISA_PY, resource=f"TCPIP::127.0.0.1::{unused_port}::SOCKET"),
     )
 
+    stalls = LongestStall()
     window.connect(choice)
-    pump(window, lambda: status(window).startswith("Connection failed"))
+    # A refused local connection takes a few seconds to be reported on Windows (pyvisa-py error -1073807339), well
+    # under a second on Linux; the wait is generous, and the stall check below is what proves the window stayed alive.
+    pump(window, lambda: stalls.tick() or status(window).startswith("Connection failed"), timeout=60)
 
     assert str(window.run_button.cget("state")) == "disabled"
+    assert stalls.longest < 1.0
 
 
 def test_the_real_opener_reports_a_backend_that_is_not_installed_with_its_reason(make_real_window):

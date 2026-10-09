@@ -182,6 +182,19 @@ def test_a_relative_xdg_config_home_is_ignored_as_the_xdg_spec_says():
     assert folder == Path("/home/me") / ".config" / "agilent34401a"
 
 
+def test_a_windows_style_xdg_config_home_is_relative_on_linux_whatever_the_host_os():
+    # Absoluteness follows the requested platform's rules, not the rules of the machine running the test.
+    folder = config_dir(environ={"XDG_CONFIG_HOME": "C:\\xdg"}, platform="linux", home=Path("/home/me"))
+
+    assert folder == Path("/home/me") / ".config" / "agilent34401a"
+
+
+def test_a_relative_appdata_is_ignored_on_windows_whatever_the_host_os():
+    folder = config_dir(environ={"APPDATA": "relative"}, platform="win32", home=Path("/home/me"))
+
+    assert folder == Path("/home/me") / "AppData" / "Roaming" / "agilent34401a"
+
+
 def test_tests_are_isolated_from_the_users_real_config_folder(tmp_path):
     assert tmp_path in config_dir().parents
 

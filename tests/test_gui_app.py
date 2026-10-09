@@ -1,3 +1,4 @@
+import _tkinter
 import gc
 import os
 import re
@@ -20,6 +21,7 @@ from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, GateTime, Resolution
 from agilent34401a.settings import Settings, Theme
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
+from agilent34401a.worker import RawReplied
 
 TIMEOUT_S = 10.0
 
@@ -59,8 +61,49 @@ def pump(window: MainWindow, until: Callable[[], bool], timeout: float = TIMEOUT
     while not until():
         if time.monotonic() > deadline:
             pytest.fail("timed out waiting for the window")
-        window.root.update()
+        _bounded_update(window.root)
         time.sleep(0.002)
+
+
+_MAX_STEPS_PER_UPDATE = 50
+
+
+def _bounded_update(root: tk.Misc) -> None:
+    """Like `root.update()`, but gives up after a few steps instead of running until nothing at all is due.
+
+    `update()` does not return while timers and idle callbacks keep coming due, which they do when the window's
+    handling of a flood of Readings takes longer than its poll interval (slow runners, coverage on Python 3.11). The
+    test could then never look at its condition or its deadline again.
+    """
+    for _ in range(_MAX_STEPS_PER_UPDATE):
+        if not root.tk.dooneevent(_tkinter.DONT_WAIT):
+            return
+
+
+def test_pump_comes_back_to_check_its_condition_even_when_timers_keep_each_other_due(make_window):
+    """Tk's `update()` runs until nothing is due, so two timers that each outlast the other's period never let it return.
+
+    That is what happened under coverage on Python 3.11, where a tick of the window's event handling took longer than
+    its poll interval and the tests hung for good in `update()`. `pump` takes a bounded number of steps instead.
+    """
+    window = make_window()
+    ticks = 0
+    running = True
+
+    def slow_timer() -> None:
+        nonlocal ticks
+        time.sleep(0.03)  # longer than the 10 ms until the other timer is due again
+        ticks += 1
+        if running:
+            window.root.after(10, slow_timer)
+
+    try:
+        window.root.after(0, slow_timer)
+        window.root.after(0, slow_timer)
+
+        pump(window, lambda: ticks >= 6, timeout=10)
+    finally:
+        running = False
 
 
 def pump_for(window: MainWindow, seconds: float) -> None:
@@ -155,33 +198,43 @@ def test_status_bar_shows_the_reading_rate_while_running_and_clears_it_when_paus
     assert window.status_rate.cget("text") == ""
 
 
-def test_window_stays_responsive_while_readings_are_slow(make_window):
-    simulator = CountingSimulator(time_scale=1, sleep=time.sleep)  # 400 ms per Reading
+def test_window_stays_responsive_while_a_reading_is_slow(make_window):
+    simulator = CountingSimulator()
+    release = threading.Event()
+    simulator.hold_reading = (3, release)  # the third Reading stays in progress until released
     window = make_window(simulator)
-    pump(window, lambda: connected(window))
+    try:
+        pump(window, lambda: simulator.reads >= 3)
 
-    slowest_update = 0.0
-    deadline = time.monotonic() + TIMEOUT_S
-    while simulator.reads < 2 and time.monotonic() < deadline:
-        started = time.monotonic()
-        window.root.update()
-        slowest_update = max(slowest_update, time.monotonic() - started)
-        time.sleep(0.002)
+        slowest_update = 0.0
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            started = time.monotonic()
+            window.root.update()
+            slowest_update = max(slowest_update, time.monotonic() - started)
+            time.sleep(0.002)
 
-    assert simulator.reads >= 2
-    assert slowest_update < 0.25  # a window blocked on a Reading would stall for the full 400 ms
+        # A window blocked on the Reading would stall until it is released (up to TIMEOUT_S), not for a moment.
+        assert slowest_update < 1.0
+    finally:
+        release.set()
 
 
 def test_pausing_while_a_slow_reading_is_in_progress_does_not_block_the_window(make_window):
-    simulator = CountingSimulator(time_scale=1, sleep=time.sleep)  # 400 ms per Reading
+    simulator = CountingSimulator()
+    release = threading.Event()
+    simulator.hold_reading = (2, release)
     window = make_window(simulator)
-    pump(window, lambda: simulator.reads > 0)
+    try:
+        pump(window, lambda: simulator.reads >= 2)
 
-    started = time.monotonic()
-    window.run_button.invoke()
-    window.root.update()
+        started = time.monotonic()
+        window.run_button.invoke()
+        window.root.update()
 
-    assert time.monotonic() - started < 0.25
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
 
 
 def test_a_failed_connection_is_reported_and_leaves_the_window_usable(make_window):
@@ -511,6 +564,18 @@ def test_the_error_is_cleared_by_the_next_successful_change(make_window):
 
     pump(window, lambda: window.status_error.cget("text") == "")
     assert window.range_box.get() == "10 V"
+
+
+def handled_everything_sent_so_far(window: MainWindow) -> None:
+    """Pump until the window has handled every event the Worker produced before it answered a marker request.
+
+    Requests are served in order and events arrive in order, so once the marker's answer is in, every Reading taken
+    before it has been handled: nothing is left in flight. (No sleeping and hoping.)
+    """
+    answered: list[RawReplied] = []
+    window.add_event_handler(lambda event: answered.append(event) if isinstance(event, RawReplied) else None)
+    window.worker.send_raw("*IDN?")
+    pump(window, lambda: bool(answered))
 
 
 def settle(window: MainWindow, simulator: CountingSimulator) -> None:
@@ -861,6 +926,7 @@ def test_menus_follow_the_theme_including_ones_added_later(make_window):
 
 def press(widget: tk.Misc, key: str) -> None:
     """Send the key to `widget` as if typed there; Tk delivers key events to the widget that has focus."""
+    widget.update()  # Windows will not move focus to a widget that has not been mapped yet
     widget.focus_force()
     widget.update()
     widget.event_generate(f"<{key}>")
@@ -1010,21 +1076,30 @@ def test_asking_for_the_shortcuts_twice_shows_one_window(make_window):
 
 
 def _shown(*widgets: tk.Misc) -> list[bool]:
-    return [bool(widget.winfo_ismapped()) for widget in widgets]
+    """Whether each widget is placed in the window (asking the layout, not whether the OS has mapped it yet)."""
+    return [bool(widget.winfo_manager()) for widget in widgets]
 
 
 def _compact_toggle(window: MainWindow) -> None:
     _choose_in_menu(window.menu("View"), "Compact mode")
 
 
-def test_compact_mode_keeps_only_the_readout_the_function_buttons_and_the_range(tk_root):
+def test_compact_mode_keeps_the_readout_the_function_buttons_run_and_the_three_settings_controls(tk_root):
     window = _window_with(tk_root, _settings_with(compact_mode=True))
     try:
         window.add_tab("Extra", ttk.Frame(window.notebook))
         window.root.update()
 
-        kept = [window.readout, window.function_label, window.function_buttons[Function.DC_VOLTAGE], window.range_box]
-        dropped = [window.setup_label, window.run_button, window.resolution_box, window.nplc_box, window.raw_check]
+        kept = [
+            window.readout,
+            window.function_label,
+            window.function_buttons[Function.DC_VOLTAGE],
+            window.run_button,
+            window.range_box,
+            window.resolution_box,
+            window.nplc_box,
+        ]
+        dropped = [window.setup_label, window.raw_check]
         assert all(_shown(*kept))
         assert not any(_shown(*dropped))
         assert not any(_shown(window.notebook))
@@ -1042,16 +1117,15 @@ def test_the_view_menu_switches_compact_mode_on_and_off_and_saves_it(tk_root, tm
 
         assert settings.compact_mode is True
         assert Settings.load(tmp_path).compact_mode is True
-        assert not window.run_button.winfo_ismapped()
+        assert not any(_shown(window.setup_label, window.raw_check, window.notebook))
 
         _compact_toggle(window)
         window.root.update()
 
         assert Settings.load(tmp_path).compact_mode is False
-        assert window.run_button.winfo_ismapped()
-        assert window.setup_label.winfo_ismapped()
-        assert window.resolution_box.winfo_ismapped()
-        assert window.notebook.winfo_ismapped()
+        assert all(
+            _shown(window.run_button, window.setup_label, window.resolution_box, window.raw_check, window.notebook)
+        )
     finally:
         window.close()
 

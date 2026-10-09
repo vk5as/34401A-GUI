@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from agilent34401a.backend import Backend
@@ -63,11 +63,14 @@ def config_dir(
     environ = os.environ if environ is None else environ
     platform = sys.platform if platform is None else platform
     home = Path.home() if home is None else home
+    # Whether a folder is absolute follows the REQUESTED platform's rules ("/xdg" has no drive, so it is relative to
+    # Windows); using the host's rules would make the answer depend on the machine this runs on.
     if platform == "win32":
-        base = Path(environ["APPDATA"]) if environ.get("APPDATA") else home / "AppData" / "Roaming"
+        appdata = environ.get("APPDATA", "")
+        base = Path(appdata) if PureWindowsPath(appdata).is_absolute() else home / "AppData" / "Roaming"
     else:
         xdg = environ.get("XDG_CONFIG_HOME", "")
-        base = Path(xdg) if xdg and Path(xdg).is_absolute() else home / ".config"
+        base = Path(xdg) if PurePosixPath(xdg).is_absolute() else home / ".config"
     return base / APP_FOLDER
 
 

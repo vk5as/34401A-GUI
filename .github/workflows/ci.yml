@@ -1,17 +1,25 @@
 name: CI
 
 on:
+  # Every push to every branch, and every pull request (spec story 101).
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request: {}
 
 permissions:
   contents: read
 
+# A newer push to the same ref supersedes the run still going for the older one. Pull requests get their own ref
+# (refs/pull/N/merge), so a branch push and its pull request do not cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Static analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,6 +43,7 @@ jobs:
   test-linux:
     name: Tests, Linux, Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +69,7 @@ jobs:
   test-windows:
     name: Tests, Windows, Python 3.14
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,6 +89,7 @@ jobs:
   build:
     name: Build wheel and sdist
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

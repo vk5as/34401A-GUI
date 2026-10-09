@@ -10,7 +10,7 @@ import pytest
 
 from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.trigger import TriggerSettings, TriggerSource
-from tests.test_gui_app import CountingSimulator, connected, pump, pump_for
+from tests.test_gui_app import CountingSimulator, connected, handled_everything_sent_so_far, pump, pump_for
 from tests.test_gui_app import press as press_key
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ def pause(window: MainWindow) -> None:
     pump(window, lambda: connected(window))
     if window.run_button.cget("text") == "Pause":
         window.run_button.invoke()
-    pump_for(window, 0.05)  # the Worker finishes the Reading in progress before it pauses
+    handled_everything_sent_so_far(window)  # the Worker finishes the Reading in progress before it pauses
 
 
 def burst_done(window: MainWindow) -> bool:

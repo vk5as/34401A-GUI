@@ -69,11 +69,34 @@ class FakeMeterOnAPty:
                 os.close(descriptor)
 
 
+def fake_meter_or_skip() -> FakeMeterOnAPty:
+    """A fake Meter on a pseudo-terminal, or a skipped test where there is none to be had.
+
+    `os.openpty` does not exist on Windows (the module is skipped there anyway) and can fail on a POSIX box that has no
+    pseudo-terminals to give (a container without /dev/ptmx, say): neither is a failure of the application.
+    """
+    try:
+        return FakeMeterOnAPty()
+    except (AttributeError, NotImplementedError, OSError) as error:
+        pytest.skip(f"no pseudo-terminal available here: {error}")
+
+
 @pytest.fixture
 def meter() -> Iterator[FakeMeterOnAPty]:
-    fake = FakeMeterOnAPty()
+    fake = fake_meter_or_skip()
     yield fake
     fake.close()
+
+
+def test_a_box_that_cannot_make_a_pseudo_terminal_skips_the_tests_instead_of_failing_them(monkeypatch):
+    def no_terminals() -> tuple[int, int]:
+        message = "out of pty devices"
+        raise OSError(message)
+
+    monkeypatch.setattr(os, "openpty", no_terminals)
+
+    with pytest.raises(pytest.skip.Exception, match="no pseudo-terminal"):
+        fake_meter_or_skip()
 
 
 def test_a_serial_connection_through_pyvisa_py_talks_to_the_meter_and_hands_it_back(meter):
@@ -113,7 +136,7 @@ def test_probe_finds_a_meter_through_the_real_pyvisa_py_stack(meter):
 
 
 def test_probe_skips_the_framings_a_port_refuses_and_reports_silence_when_nothing_answers():
-    silent = FakeMeterOnAPty()
+    silent = fake_meter_or_skip()
     silent.answer = False
     try:
         result = run_probe(

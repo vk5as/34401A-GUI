@@ -691,6 +691,27 @@ class MainWindow:
         self._worker.apply_setup(setup)
         return True
 
+    def store_in_meter(self, location: int) -> bool:
+        """Ask the Worker to store the Meter's Setup in its Meter Memory `location` (1 to 3), overwriting what is there.
+
+        Returns False, having sent nothing, when there is no Connection or the Meter is busy with another change.
+        """
+        if self._setup is None or self._busy or self._ended or not self._connected:
+            return False
+        self._worker.save_to_meter(location)
+        return True
+
+    def recall_from_meter(self, location: int) -> bool:
+        """Ask the Worker to replace the Meter's Setup with the one in Meter Memory `location`, locking the controls.
+
+        Returns False, having sent nothing, when there is no Connection or the Meter is busy with another change.
+        """
+        if self._setup is None or self._busy or self._ended or not self._connected:
+            return False
+        self._begin_change()
+        self._worker.recall_from_meter(location)
+        return True
+
     def _on_function(self, function: Function) -> None:
         if self._setup is None or self._busy or self._ended:
             return

@@ -8,7 +8,8 @@ The columns are `timestamp_iso, elapsed_s, function, range, value, unit, raw, ma
   never scaled with a prefix.
 - `range` is the Range as a plain number in the unit of the Function's input (volts for frequency), `auto` for
   Autorange, and empty for a Function with no Range choice or when the Setup is not known.
-- An Overload has `OVLD` for its value; `raw` always holds the Raw Reading exactly as the Meter sent it.
+- An Overload's `value` is the Meter's own number (+9.9e+37 or -9.9e+37, so the column stays numeric and the sign is
+  kept); the window shows it as OVLD, the CSV does not. `raw` always holds the Raw Reading exactly as the Meter sent it.
 - `math_mode` is the Math Operation in effect (`NULL`, `DB`, `DBM`, `STATS` or `LIMIT`), empty for none; `limit_result`
   is `HI`, `LO` or `PASS` while a Limit Test runs, empty otherwise. They are made by `math_mode_text` and
   `limit_result_text`. With Null the `value` is the Reading minus the offset, and with dB or dBm it is in dB or dBm and
@@ -41,7 +42,6 @@ COLUMNS = (
     "math_mode",
     "limit_result",
 )
-OVERLOAD_TEXT = "OVLD"
 AUTORANGE_TEXT = "auto"
 _ENCODING = "utf-8"
 _LINE_ENDING = "\n"
@@ -76,7 +76,7 @@ def csv_row(item: LoggedReading) -> list[str]:
         f"{item.elapsed_s:.3f}",
         reading.function.label,
         "" if setup is None else _range_text(setup),
-        OVERLOAD_TEXT if reading.is_overload else repr(reading.value),
+        repr(reading.value),
         reading.unit,
         reading.raw.strip(),
         _math_mode(item),

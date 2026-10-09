@@ -118,7 +118,7 @@ def test_log_prints_csv_on_stdout_for_the_simulator(capsys):
     rows = read_csv(captured.out)
     assert captured.err == ""
     assert len(rows) == 4
-    assert all(row["unit"] == "V" and row["value"] not in {"", "OVLD"} for row in rows)
+    assert all(row["unit"] == "V" and abs(float(row["value"])) < 9.9e37 for row in rows)
     assert all(row["timestamp_iso"] and row["raw"] for row in rows)
 
 

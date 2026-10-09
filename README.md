@@ -331,8 +331,9 @@ asserted, so use a slower baud rate if characters are lost.
 The window records Readings to a file: the Record button (or File → Record to CSV…, or Ctrl+L) streams every Reading
 to a file and the status bar shows `REC` and the file until you stop; File → Export History as CSV… saves the Readings
 the Chart is showing. The columns are `timestamp_iso, elapsed_s, function, range, value, unit, raw, math_mode,
-limit_result`. `value` is in the base unit (volts, ohms, ...), `OVLD` for an Overload, and `raw` is the Meter's own
-text. The file is UTF-8 with LF line endings; Excel needs "From Text/CSV" with UTF-8 to show the Ω unit.
+limit_result`. `value` is in the base unit (volts, ohms, ...); for an Overload it is the Meter's own number, `9.9e+37` or `-9.9e+37`
+(the window shows OVLD, the CSV keeps the column numeric). `raw` is the Meter's own text. The file is UTF-8 with LF line
+endings; Excel needs "From Text/CSV" with UTF-8 to show the Ω unit.
 `math_mode` is the Math Operation in effect (`NULL`, `DB`, `DBM`, `STATS` or `LIMIT`; empty for none) and
 `limit_result` is `HI`, `LO` or `PASS` during a Limit Test. Under Null `value` is the Reading minus the offset, and
 under dB or dBm it is in dB or dBm, which `unit` says. The command line's `log` writes the same columns.

@@ -7,12 +7,12 @@ at once (`csv_log`), so a crash loses nothing.
 
 import logging
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from agilent34401a.csv_log import Recording, export_history
+from agilent34401a.gui.csv_dialog import ask_csv_file
 from agilent34401a.gui.themes import ERROR_STYLE
 
 if TYPE_CHECKING:
@@ -31,12 +31,6 @@ _RECORD_ENTRY = "Record to CSV…"
 _STOP_ENTRY = "Stop recording"
 _EXPORT_ENTRY = "Export History as CSV…"
 _ERROR_TITLE = "CSV"
-
-
-def _default_name() -> str:
-    return (
-        f"34401A-{datetime.now():%Y%m%d-%H%M%S}.csv"  # noqa: DTZ005 - a local time in a file name is what people expect
-    )
 
 
 def _shortened(path: Path) -> str:
@@ -156,24 +150,10 @@ class RecordingControl:
     # --- dialogs ------------------------------------------------------------------------------------------------
 
     def _ask_record_file(self) -> Path | None:
-        name = filedialog.asksaveasfilename(
-            parent=self._parent,
-            title="Record Readings to CSV",
-            initialfile=_default_name(),
-            defaultextension=".csv",
-            filetypes=[("CSV file", "*.csv")],
-        )
-        return Path(name) if name else None
+        return ask_csv_file(self._parent, "Record Readings to CSV")
 
     def _ask_export_file(self) -> Path | None:
-        name = filedialog.asksaveasfilename(
-            parent=self._parent,
-            title="Export History as CSV",
-            initialfile=_default_name(),
-            defaultextension=".csv",
-            filetypes=[("CSV file", "*.csv")],
-        )
-        return Path(name) if name else None
+        return ask_csv_file(self._parent, "Export History as CSV")
 
     def _show_error(self, title: str, message: str) -> None:
         messagebox.showerror(title, message, parent=self._parent)

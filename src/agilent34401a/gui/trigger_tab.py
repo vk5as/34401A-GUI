@@ -8,13 +8,13 @@ readout, the chart and the History like any others, and can be exported to CSV. 
 import tkinter as tk
 import weakref
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 from typing import TYPE_CHECKING
 
 from agilent34401a.csv_log import LoggedReading, write_csv
 from agilent34401a.errors import InvalidSetupError
+from agilent34401a.gui.csv_dialog import ask_csv_file
 from agilent34401a.gui.themes import ERROR_STYLE
 from agilent34401a.gui.tooltip import Tooltip
 from agilent34401a.trigger import READING_MEMORY_SIZE, TriggerSettings, TriggerSource
@@ -49,10 +49,6 @@ _NO_DEVICE_CLEAR = (
 _SINGLE_TOOLTIP = "Take one Reading (Space)."
 _WIDTH = 8
 _ERROR_TITLE = "CSV"
-
-
-def _default_name() -> str:
-    return f"34401A-burst-{datetime.now():%Y%m%d-%H%M%S}.csv"  # noqa: DTZ005 - a local time in a file name
 
 
 def _whole_number(text: str, name: str) -> int:
@@ -361,14 +357,7 @@ class TriggerTab:
         return True
 
     def _ask_export_file(self) -> Path | None:
-        name = filedialog.asksaveasfilename(
-            parent=self._root,
-            title="Export Burst as CSV",
-            initialfile=_default_name(),
-            defaultextension=".csv",
-            filetypes=[("CSV file", "*.csv")],
-        )
-        return Path(name) if name else None
+        return ask_csv_file(self._root, "Export Burst as CSV", "34401A-burst")
 
     def _show_error(self, title: str, message: str) -> None:
         messagebox.showerror(title, message, parent=self._root)

@@ -364,7 +364,7 @@ the Limit Test. The Meter turns the Operation off when the Function changes.
 
 ## Presets
 
-The Meter has no setup memory of its own, so the Presets tab keeps named Setups in the application. Save current
+The Meter's own memory (`*SAV` and `*RCL`) holds only a few unnamed Setups and can be used only through the remote interface, so the Presets tab keeps named Setups in the application. Save current
 Setup stores what the Meter last reported under the name you type. Apply sends a Preset to the Meter (Function first,
 then Range and Resolution, the sense options, the trigger and the Math Operation) and then says which settings the Meter
 did **not** take, so that a Preset never half-applies without you knowing; the Meter's own error messages follow. Rename…,
@@ -413,7 +413,7 @@ python3 -m venv .venv
 ```
 
 The domain terms used in the code, the UI and the tests (Meter, Reading, Setup, Preset, Connection, Backend, ...) are
-defined in [CONTEXT.md](CONTEXT.md), and the reasons for the larger decisions are the records in [docs/adr](docs/adr).
+defined in [GLOSSARY.md](GLOSSARY.md), and the reasons for the larger decisions are the records in [docs/adr](docs/adr).
 
 ### Code quality
 

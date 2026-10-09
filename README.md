@@ -488,7 +488,7 @@ push or a tag. To release:
 2. Run the Release workflow on `main`. It refuses to start if the tag `v<version>` already exists.
 3. It runs the static analysis and tests (Linux and Windows), builds the wheel and sdist, runs `twine check` and
    `check-wheel-contents`, then installs the built wheel into a clean virtual environment on Windows with Python
-   3.11, 3.12, 3.13 and 3.14. There it constructs the GUI against the Simulator and runs `--help` for
+   3.10, 3.11, 3.12, 3.13 and 3.14. There it constructs the GUI against the Simulator and runs `--help` for
    `agilent34401a-cli` and `agilent34401a-sim`.
 4. Only if every one of those passed does it create the release `v<version>`, with the wheel and sdist attached and
    generated release notes. Run from any other branch, it executes the gates as a dry run and creates nothing.

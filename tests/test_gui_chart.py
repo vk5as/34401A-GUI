@@ -284,6 +284,20 @@ def test_zooming_switches_autoscale_off_and_new_readings_leave_the_view_alone(ma
     assert chart.autoscale is False
 
 
+def test_matplotlibs_own_first_draw_does_not_switch_autoscale_off(make_chart):
+    chart = make_chart()
+    chart.update()  # the canvas is mapped and drawn for the first time, empty
+
+    chart.canvas.draw()
+    feed(chart, [1.0, 2.0, 3.0])
+    chart.canvas.draw()
+
+    assert chart.autoscale is True
+    low, high = chart.axes.get_ylim()
+    assert 0.5 < low <= 1.0
+    assert 3.0 <= high < 3.5
+
+
 def test_the_autoscale_button_fits_the_view_again(make_chart):
     chart = make_chart()
     feed(chart, [1.0, 2.0, 3.0])

@@ -126,6 +126,10 @@ class ChartTab(ttk.Frame):
         self.axes: Axes = self.figure.add_subplot()
         self.axes.grid(visible=True, alpha=0.3)
         (self.line,) = self.axes.plot([], [], linewidth=1.0)
+        # Matplotlib fixes an axis' limits lazily, on the first draw, and says so with a limits-changed event as if
+        # somebody had zoomed. Setting them now (this tab fits the view itself) leaves nothing for the draw to do.
+        self.axes.set_xlim(0.0, 1.0)
+        self.axes.set_ylim(0.0, 1.0)
         self.axes.callbacks.connect("xlim_changed", self._on_view_changed)
         self.axes.callbacks.connect("ylim_changed", self._on_view_changed)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)  # type: ignore[no-untyped-call]

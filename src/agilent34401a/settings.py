@@ -212,6 +212,6 @@ def _read_connection(data: object) -> LastConnection | None:
             serial=SerialSettings.from_json(serial) if isinstance(serial, dict) else None,
         )
         simulate = data["simulate"]
-    except (KeyError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError, OverflowError):  # OverflowError: int(Infinity) from a hand-edited file
         return None
     return LastConnection(simulate=simulate, connection=connection) if isinstance(simulate, bool) else None

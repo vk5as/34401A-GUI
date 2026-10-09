@@ -8,6 +8,15 @@ from agilent34401a.errors import PresetError
 from agilent34401a.meter import Function, Setup
 from agilent34401a.preset import setup_from_json, setup_to_json
 
+
+class HugeInteger(int):
+    """An int that pytest names briefly instead of by its four hundred digits."""
+
+    def __repr__(self) -> str:
+        return "10**400"
+
+
+HUGE_INTEGER = HugeInteger(10**400)  # too big for a float, so math.isfinite raises OverflowError on it
 DC_VOLTAGE: dict[str, Any] = setup_to_json(Setup.default(Function.DC_VOLTAGE))
 
 
@@ -56,6 +65,8 @@ def test_fields_this_version_does_not_know_are_ignored():
         ("range", "10"),
         ("range", True),
         ("range", float("nan")),
+        ("range", HUGE_INTEGER),
+        ("nplc", HugeInteger(-(10**400))),
         ("resolution", 7.5),
         ("resolution", "6.5"),
         ("nplc", "10"),
@@ -82,6 +93,8 @@ def test_a_value_of_the_wrong_kind_is_named_in_the_error(field, value):
         ("math", "null_offset", "0"),
         ("math", "limit_upper", None),
         ("math", "dbm_reference_resistance", float("inf")),
+        ("math", "null_offset", HUGE_INTEGER),
+        ("trigger", "delay", HUGE_INTEGER),
     ],
 )
 def test_a_bad_value_inside_the_trigger_or_math_is_named_in_the_error(section, field, value):

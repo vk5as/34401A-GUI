@@ -254,3 +254,61 @@ def test_serial_settings_that_cannot_be_read_back_leave_no_remembered_connection
     )
 
     assert Settings.load(tmp_path).last_connection is None
+
+
+def _connection_with(**changes: object) -> dict[str, object]:
+    return {
+        "simulate": False,
+        "backend": "py",
+        "resource": None,
+        "gpib_board": 0,
+        "gpib_address": 22,
+        "serial": None,
+        **changes,
+    }
+
+
+@pytest.mark.parametrize(
+    "connection",
+    [
+        _connection_with(gpib_board=float("inf")),
+        _connection_with(gpib_address=float("-inf")),
+        _connection_with(
+            serial={
+                "port": "COM1",
+                "baud": 9600,
+                "framing": 5,
+                "flow_control": "none",
+                "terminator": "lf",
+                "dtr": None,
+                "rts": None,
+            }
+        ),
+        _connection_with(
+            serial={
+                "port": "COM1",
+                "baud": 9600,
+                "framing": ["8N1"],
+                "flow_control": "none",
+                "terminator": "lf",
+                "dtr": None,
+                "rts": None,
+            }
+        ),
+        _connection_with(
+            serial={
+                "port": "COM1",
+                "baud": 10**400,
+                "framing": "8N1",
+                "flow_control": "none",
+                "terminator": "lf",
+                "dtr": None,
+                "rts": None,
+            }
+        ),
+    ],
+)
+def test_a_remembered_connection_with_exotic_values_is_forgotten_not_a_crash(tmp_path, connection):
+    (tmp_path / SETTINGS_FILE).write_text(json.dumps({"last_connection": connection}), encoding="utf-8")
+
+    assert Settings.load(tmp_path).last_connection is None

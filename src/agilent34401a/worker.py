@@ -2,7 +2,7 @@
 
 The GUI and CLI never call into the Transport or Driver themselves. They send the Worker requests
 (`connect`, `start_continuous`, `pause`, `single`, `start_burst`, `cancel_burst`, `apply_setup`, `disconnect`,
-`shutdown`) and learn what happened from the
+`save_to_meter`, `recall_from_meter`, `shutdown`) and learn what happened from the
 events it puts on the queue it was given, which Tk drains with `after()`.
 
 One Worker serves one Connection at a time but many in turn: `connect` opens one, `disconnect` (or a lost Connection)
@@ -21,7 +21,15 @@ from datetime import datetime, timedelta
 from functools import partial
 
 from agilent34401a.burst import Burst, plan_burst, reading_offsets
-from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
+from agilent34401a.driver import (
+    RECALL_LOCATIONS,
+    STORE_LOCATIONS,
+    Driver,
+    Identity,
+    QueuedError,
+    SystemInfo,
+    check_location,
+)
 from agilent34401a.errors import (
     BurstRefusedError,
     BurstTooLargeError,
@@ -181,6 +189,13 @@ class SelfTestFinished:
 
 
 @dataclass(frozen=True)
+class MeterMemoryStored:
+    """The Meter's Setup was stored in its own Meter Memory `location`, and the Meter queued no error about it."""
+
+    location: int
+
+
+@dataclass(frozen=True)
 class LockoutChanged:
     """The front panel's Local key was disabled (Lockout) or enabled again."""
 
@@ -280,6 +295,7 @@ Event = (
     | ResetDone
     | SelfTestFinished
     | LockoutChanged
+    | MeterMemoryStored
     | AdminFailed
     | SetupFailed
     | ReadingFailed
@@ -346,6 +362,11 @@ class _Raw:
 
 
 @dataclass(frozen=True)
+class _Recall:
+    location: int
+
+
+@dataclass(frozen=True)
 class _System:
     """A request about the Meter itself rather than its Setup; `what` names it in a failure message."""
 
@@ -369,6 +390,7 @@ _Request = (
     | _Select
     | _System
     | _Raw
+    | _Recall
 )
 
 
@@ -519,6 +541,25 @@ class Worker:
         """Disable (Lockout) or enable the front panel's Local key."""
         self._requests.put(_System("Front panel lockout", partial(self._lockout, locked=locked)))
 
+    def save_to_meter(self, location: int) -> None:
+        """Store the Meter's Setup in its own Meter Memory `location` (1 to 3), overwriting what was there.
+
+        Only on the user's request (ADR-0004). The answer is a `MeterMemoryStored`, or an `ErrorsReported` if the Meter
+        complained. A location the Meter does not have raises `ValueError` here, before anything is sent.
+        """
+        check_location(location, STORE_LOCATIONS)
+        self._requests.put(_System("Storing the Setup in the Meter", partial(self._store_in_meter, location=location)))
+
+    def recall_from_meter(self, location: int) -> None:
+        """Replace the Meter's Setup with the one in its Meter Memory `location` (0, the power-down state, to 3).
+
+        Only on the user's request (ADR-0004). The answer is a `SetupChanged` with the Setup the Meter is really in
+        afterwards, then an `ErrorsReported` if it complained (a location that was never stored, say). A location the
+        Meter does not have raises `ValueError` here, before anything is sent.
+        """
+        check_location(location, RECALL_LOCATIONS)
+        self._requests.put(_Recall(location))
+
     def is_alive(self) -> bool:
         """Whether the Worker's thread is still running."""
         return self._thread.is_alive()
@@ -643,14 +684,16 @@ class Worker:
                     continue
                 case _CancelBurst():
                     pass  # no Burst is being waited for
-                case _System() | _Apply() | _Select() | _Raw():
+                case _System() | _Apply() | _Select() | _Raw() | _Recall():
                     self._serve_command(driver, transport, request)
             if not running or (congested and request is None):
                 continue  # paused, or waiting for the consumer to catch up
             self._take_reading(driver, transport)
             self._check_errors_if_due(driver, transport)
 
-    def _serve_command(self, driver: Driver, transport: Transport, request: _System | _Apply | _Select | _Raw) -> None:
+    def _serve_command(
+        self, driver: Driver, transport: Transport, request: _System | _Apply | _Select | _Raw | _Recall
+    ) -> None:
         match request:
             case _System():
                 self._administer(driver, transport, request)
@@ -658,6 +701,8 @@ class Worker:
                 self._change_setup(driver, transport, partial(driver.apply, setup), requested=setup)
             case _Select(function):
                 self._change_setup(driver, transport, partial(driver.select_function, function))
+            case _Recall(location):
+                self._change_setup(driver, transport, partial(driver.recall_from_meter, location))
             case _Raw(command, allow_calibration):
                 self._send_raw(driver, transport, command, allow_calibration=allow_calibration)
 
@@ -929,6 +974,11 @@ class Worker:
     def _reset_statistics(driver: Driver) -> list[Event]:
         errors = driver.reset_statistics()
         return [*_report(errors), StatisticsRead(driver.fetch_statistics())]
+
+    @staticmethod
+    def _store_in_meter(driver: Driver, *, location: int) -> list[Event]:
+        errors = driver.save_to_meter(location)
+        return _report(errors) if errors else [MeterMemoryStored(location)]
 
     @staticmethod
     def _self_test(driver: Driver) -> list[Event]:

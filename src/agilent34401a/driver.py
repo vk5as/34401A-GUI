@@ -252,7 +252,7 @@ class Driver:
         `location` is 1 to 3, anything else raises `ValueError` before anything is sent. This overwrites what was
         there, so it is only ever done on the user's request (ADR-0004).
         """
-        _check_location(location, STORE_LOCATIONS)
+        check_location(location, STORE_LOCATIONS)
         self._transport.write(f"*SAV {location}")
         return self.drain_errors()
 
@@ -263,7 +263,7 @@ class Driver:
         Setup the driver remembers is no longer right afterwards, so the caller must `read_setup` (ADR-0004: read it
         back, never assume it).
         """
-        _check_location(location, RECALL_LOCATIONS)
+        check_location(location, RECALL_LOCATIONS)
         self._transport.write(f"*RCL {location}")
         errors = self.drain_errors()
         self._setup = Setup.default(self._setup.function)  # a stand-in until read_setup, as after select_function
@@ -699,7 +699,8 @@ class Driver:
         return value
 
 
-def _check_location(location: int, allowed: range) -> None:
+def check_location(location: int, allowed: range) -> None:
+    """Raise `ValueError` unless `location` is one of the Meter Memory locations in `allowed`."""
     if location not in allowed:
         message = f"Meter Memory location is {allowed.start} to {allowed[-1]}, not {location}"
         raise ValueError(message)

@@ -74,6 +74,19 @@ class TriggerModel:
         self._trigger_starts: list[float] = []  # in simulated seconds after INIT, for Bus and External triggers
         self._generated = 0
 
+    def snapshot(self) -> TriggerSettings:
+        """Return the trigger settings for Meter Memory (`*SAV`); a measurement in progress and Reading Memory are not saved."""
+        return self.settings
+
+    def restore(self, settings: TriggerSettings) -> None:
+        """Put back the trigger settings `snapshot` took (`*RCL`). Whatever was being measured is abandoned."""
+        self.abort()
+        self.source = settings.source
+        self.delay_auto = settings.delay is None
+        self.delay_s = 0.0 if settings.delay is None else settings.delay
+        self.sample_count = settings.sample_count
+        self.trigger_count = settings.trigger_count
+
     @property
     def settings(self) -> TriggerSettings:
         return TriggerSettings(

@@ -6,7 +6,9 @@ import random
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 from agilent34401a.applied_signal import AppliedSignal
 from agilent34401a.errors import TransportError, TransportTimeoutError
@@ -23,6 +25,7 @@ from agilent34401a.meter import (
 )
 from agilent34401a.sim_math import MathUnit
 from agilent34401a.sim_trigger import SimHost, TriggerModel
+from agilent34401a.trigger import TriggerSettings
 
 HEWLETT_PACKARD_IDENTITY = "HEWLETT-PACKARD,34401A,0,10-5-2"
 AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
@@ -48,6 +51,9 @@ _ILLEGAL_PARAMETER = '-224,"Illegal parameter value"'
 _DATA_OUT_OF_RANGE = '-222,"Data out of range"'
 _COMMAND_PROTECTED = '-203,"Command protected"'
 _SELF_TEST_FAILED = '-330,"Self-test failed"'
+_MEMORY_LOST = '-314,"Save/recall memory lost"'
+METER_MEMORY_LOCATIONS = range(4)
+"""The Meter Memory locations `*RCL` accepts: 0 is the power-down state, 1 to 3 are the user's (`*SAV` takes only those)."""
 
 SCPI_VERSION = "1994.0"
 SELF_TEST_DURATION_S = 10.0
@@ -193,6 +199,21 @@ _CONTINUITY_LIMIT = 1.2e3
 _DIODE_LIMIT = 1.2
 
 
+@dataclass(frozen=True)
+class _Stored:
+    """One location of Meter Memory: everything `*SAV` keeps of the Simulator's Setup."""
+
+    function: Function
+    ranges: dict[Function, float | None]
+    nplc: dict[Function, float]
+    ac_filter: AcFilter
+    autozero: Autozero
+    input_impedance: InputImpedance
+    gate_times: dict[Function, GateTime]
+    trigger: TriggerSettings
+    math: dict[str, Any]
+
+
 class Simulator:
     """One simulated Meter, driven through the same text interface as a real one.
 
@@ -261,6 +282,9 @@ class Simulator:
         )
         self._math = MathUnit(self._reply, self._errors.append)
         self._reset()
+        # Meter Memory survives `*RST`. Location 0 holds the power-down state, which starts as the reset state; the
+        # others are empty until something is stored there.
+        self._meter_memory: dict[int, _Stored] = {0: self._store()}
 
     @property
     def signal_time(self) -> float:
@@ -331,6 +355,8 @@ class Simulator:
                 self._math.clear_status()
             case "*RST":
                 self._reset()
+            case "*SAV" | "*RCL":
+                self._meter_memory_command(header, argument)
             case "*STB?":
                 status = (_ERROR_QUEUE_STATUS_BIT if self._errors else 0) | self._trigger.status_bits()
                 self._reply(str(status | self._math.status_byte_bits))
@@ -341,6 +367,52 @@ class Simulator:
                 self._reply("+0" if passed else "+1", SELF_TEST_DURATION_S)
             case _:
                 self._errors.append(_UNDEFINED_HEADER)
+
+    def _store(self) -> "_Stored":
+        """Copy the whole Setup the Simulator models: active Function, each Function's settings, trigger and Math."""
+        return _Stored(
+            function=self._function,
+            ranges=dict(self._ranges),
+            nplc=dict(self._nplc),
+            ac_filter=self._ac_filter,
+            autozero=self._autozero,
+            input_impedance=self._input_impedance,
+            gate_times=dict(self._gate_times),
+            trigger=self._trigger.snapshot(),
+            math=self._math.snapshot(),
+        )
+
+    def _recall(self, stored: "_Stored") -> None:
+        self._function = stored.function
+        self._ranges = dict(stored.ranges)
+        self._nplc = dict(stored.nplc)
+        self._ac_filter = stored.ac_filter
+        self._autozero = stored.autozero
+        self._input_impedance = stored.input_impedance
+        self._gate_times = dict(stored.gate_times)
+        self._trigger.restore(stored.trigger)
+        self._math.restore(stored.math)
+
+    def _meter_memory_command(self, header: str, argument: str) -> None:
+        """`*SAV n` stores the Setup in location 1 to 3; `*RCL n` puts back location 0 to 3."""
+        if not argument:
+            self._errors.append(_MISSING_PARAMETER)
+            return
+        number = _number(argument)
+        if number is None:
+            self._errors.append(_ILLEGAL_PARAMETER)
+            return
+        writing = header == "*SAV"
+        location = int(number)
+        lowest = 1 if writing else 0
+        if number != location or not lowest <= location <= METER_MEMORY_LOCATIONS[-1]:
+            self._errors.append(_DATA_OUT_OF_RANGE)
+        elif writing:
+            self._meter_memory[location] = self._store()
+        elif location not in self._meter_memory:
+            self._errors.append(_MEMORY_LOST)
+        else:
+            self._recall(self._meter_memory[location])
 
     def _system_command(self, key: str, *, query: bool, argument: str) -> bool:
         """Handle the beeper, display, version, front panel and calibration commands; False when `key` is not one."""

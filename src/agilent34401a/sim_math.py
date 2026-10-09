@@ -9,6 +9,7 @@ Nothing here is specific to the Transport.
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 from agilent34401a.math_operations import (
     DEFAULT_DBM_RESISTANCE,
@@ -80,6 +81,19 @@ class MathUnit:
         self._dbm_resistance = DEFAULT_DBM_RESISTANCE
         self._limit_lower = 0.0
         self._limit_upper = 0.0
+        self._questionable_condition = 0
+        self._clear_statistics()
+
+    _SAVED = ("_operation", "_on", "_null_offset", "_db_reference", "_dbm_resistance", "_limit_lower", "_limit_upper")
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return the Math settings for Meter Memory (`*SAV`). The Statistics gathered so far are not part of a Setup."""
+        return {name: getattr(self, name) for name in self._SAVED}
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """Put back what `snapshot` took (`*RCL`); the Statistics start again and latched Limit Test failures go."""
+        for name, value in snapshot.items():
+            setattr(self, name, value)
         self._questionable_condition = 0
         self._clear_statistics()
 

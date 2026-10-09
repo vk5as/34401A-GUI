@@ -453,9 +453,13 @@ _AUTORANGE_STEPS = 5  # Autorange may measure at several Ranges before it settle
 
 
 def reading_timeout(setup: Setup) -> float:
-    """Seconds to wait for a Reading in this Setup before giving up (ADR-0002)."""
+    """Seconds to wait for a Reading in this Setup before giving up (ADR-0002).
+
+    A fixed Trigger Delay is waited out before every Reading (Single and Continuous keep it), so it counts in full.
+    """
     steps = _AUTORANGE_STEPS if setup.range is None and setup.function.ranges else 1
-    return max(_MIN_TIMEOUT_S, measurement_time(setup) * steps * _TIMEOUT_MARGIN + _TIMEOUT_EXTRA_S)
+    delay = setup.trigger.delay or 0.0
+    return max(_MIN_TIMEOUT_S, (delay + measurement_time(setup) * steps) * _TIMEOUT_MARGIN + _TIMEOUT_EXTRA_S)
 
 
 @dataclass(frozen=True)

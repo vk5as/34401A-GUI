@@ -9,6 +9,7 @@ from agilent34401a.driver import QueuedError
 from agilent34401a.errors import TransportError
 from agilent34401a.meter import Function, Resolution, Setup, reading_timeout
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
+from agilent34401a.trigger import TriggerSettings
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
@@ -856,3 +857,17 @@ def test_an_empty_raw_command_is_reported_not_sent(started):
     assert isinstance(failed, RawFailed)
     assert "Nothing to send" in failed.message
     assert len(simulator.writes) == written
+
+
+def test_a_fixed_trigger_delay_is_part_of_what_a_reading_may_take_so_readings_do_not_time_out(started):
+    simulator = HookedSimulator(time_scale=1, sleep=lambda _seconds: None)
+    worker, events = started(simulator)
+    next_event(events)
+    delayed = Setup.default(Function.DC_VOLTAGE).with_trigger(TriggerSettings(delay=4.0))
+
+    worker.apply_setup(delayed)
+    worker.start_continuous()
+
+    assert next_event(events) == SetupChanged(delayed)
+    assert simulator.timeout > 4.0
+    assert isinstance(next_event(events), ReadingTaken)

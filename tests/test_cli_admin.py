@@ -162,3 +162,75 @@ def test_every_admin_command_takes_the_connection_options(command, capsys):
 
     assert exit_info.value.code == 0
     assert "--gpib-address" in capsys.readouterr().out
+
+
+# --- Meter Memory ----------------------------------------------------------------------------------------------------
+
+
+def test_save_stores_the_meters_setup_in_a_numbered_location_and_says_so(monkeypatch, capsys):
+    writes = record_writes(monkeypatch)
+
+    assert main(["save", "2", "--simulate"]) == 0
+
+    assert "*SAV 2" in writes
+    assert capsys.readouterr().out == "Stored the Meter's Setup in Meter Memory location 2\n"
+
+
+class StaysOpen(Simulator):
+    """One Meter for several commands: the command line closes its Transport after each, which would end this one."""
+
+    def close(self) -> None:
+        pass
+
+
+def test_recall_puts_a_stored_setup_back_and_says_what_the_meter_is_now_in(monkeypatch, capsys):
+    simulator = StaysOpen()
+    simulator.write("VOLT:DC:RANG 10")
+    use(monkeypatch, lambda: simulator)
+    assert main(["save", "1", "--simulate"]) == 0
+    simulator.write("VOLT:DC:RANG 1")
+    capsys.readouterr()
+
+    assert main(["recall", "1", "--simulate"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("Recalled Meter Memory location 1: DC V")
+    assert "10 V range" in captured.out
+    assert simulator.query("VOLT:DC:RANG?") == "+1.00000000E+01"
+
+
+def test_recall_fails_with_the_meters_error_when_the_location_was_never_stored(capsys):
+    assert main(["recall", "3", "--simulate"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Meter error -314: Save/recall memory lost" in captured.err
+
+
+def test_the_power_down_location_can_be_recalled_but_not_saved_to(capsys):
+    assert main(["recall", "0", "--simulate"]) == 0
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as stopped:
+        main(["save", "0", "--simulate"])
+
+    assert stopped.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", [["save", "4"], ["recall", "4"], ["save", "x"], ["save"]])
+def test_a_location_the_meter_does_not_have_is_a_usage_error(command, capsys):
+    with pytest.raises(SystemExit) as stopped:
+        main([*command, "--simulate"])
+
+    assert stopped.value.code == 2
+    assert capsys.readouterr().err
+
+
+def test_nothing_but_the_commands_ever_sends_sav_or_rcl(monkeypatch):
+    writes = record_writes(monkeypatch)
+
+    for command in (["idn"], ["read"], ["errors"], ["reset"]):
+        assert main([*command, "--simulate"]) == 0
+
+    assert not [command for command in writes if command.startswith(("*SAV", "*RCL"))]

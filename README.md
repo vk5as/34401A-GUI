@@ -159,7 +159,7 @@ Export Burst as CSV…), View (Clear History, Compact mode, Theme) and Help (Sho
 | **Sense** | AC Filter (3, 20 or 200 Hz), Gate Time, Autozero (on, off or once) and Input Impedance, each enabled only for the Functions it applies to. |
 | **Trigger** | Trigger Source, Trigger Delay, Sample Count and Trigger Count, and Start Burst. See [Single and Burst](#single-and-burst). |
 | **Math** | Null, dB, dBm, the Meter's Statistics and a Limit Test. See [Math](#math). |
-| **Presets** | Named Setups to save, apply, rename, delete, export and import. See [Presets](#presets). |
+| **Presets** | Named Setups to save, apply, rename, delete, export and import; and below them the Meter's own **Meter Memory**, to store and recall its numbered Setups. See [Presets](#presets). |
 | **System** | Identity, firmware and SCPI version; Reset… (asks first) and Self-test; the front-panel Lockout; the beeper (with a test beep) and display (on or off, and a message of up to 12 characters); the calibration count and message, **read-only**; and the log of Meter errors with their time, code and message. |
 | **SCPI console** | A raw SCPI command or query and the Meter's reply, with Up/Down to recall earlier commands. Calibration writes are refused unless the override is ticked, which covers the next command only ([ADR-0006](docs/adr/0006-calibration-writes-are-blocked.md)). |
 
@@ -252,7 +252,14 @@ agilent34401a-cli idn --simulate        # print the Meter's identity and firmwar
 agilent34401a-cli errors --simulate     # print and clear the Meter's error queue
 agilent34401a-cli selftest --simulate   # run the self-test (about 10 s on a real Meter); 1 if it fails
 agilent34401a-cli reset --simulate      # *RST: the only command that resets the Meter
+agilent34401a-cli save 2 --simulate     # *SAV 2: store the Meter's Setup in its own Meter Memory location 2 (1 to 3)
+agilent34401a-cli recall 2 --simulate   # *RCL 2: put that Setup back (0 to 3), then print what the Meter is now in
 ```
+
+`save` and `recall` use the Meter's own numbered, unnamed [Meter Memory](#presets) and, like `reset`, change the Meter only
+because you asked. `recall` reads the Setup back and prints it; recalling a location that was never stored fails with the
+Meter's error and exit code 1. (With `--simulate` each command starts a new Simulator, so use the
+[Simulator server](#simulator) to see a store survive until the recall.)
 
 `raw` sends one raw SCPI command or query and prints the reply, like the SCPI console tab (Ctrl+K). Commands that
 would change the Meter's calibration (`CAL:SEC`, `CAL:VAL`, `CAL`, `CAL:STR` writes) are refused with exit code 2
@@ -367,13 +374,32 @@ the Limit Test. The Meter turns the Operation off when the Function changes.
 
 ## Presets
 
-The Meter's own memory (`*SAV` and `*RCL`) holds only a few unnamed Setups and can be used only through the remote interface, so the Presets tab keeps named Setups in the application. Save current
+The Meter's own memory (`*SAV` and `*RCL`) holds only a few unnamed Setups, so the Presets tab keeps named Setups in the application. Save current
 Setup stores what the Meter last reported under the name you type. Apply sends a Preset to the Meter (Function first,
 then Range and Resolution, the sense options, the trigger and the Math Operation) and then says which settings the Meter
 did **not** take, so that a Preset never half-applies without you knowing; the Meter's own error messages follow. Rename…,
 Delete, Export… (one Preset), Export all… and Import… (a file, asking whether to replace or keep both when a name is
 already used) complete the tab. Presets live in `presets.json` beside the settings and travel between bench PCs as
 exported `.json` files. A Preset holds the Setup the Meter reported, so it never holds Autozero Once.
+
+### Meter Memory
+
+Below the Presets, a separate **Meter Memory** section uses the Meter's own memory: four numbered locations that hold a
+whole Setup (the Function, each Function's Range and Integration Time, the sense options, the trigger settings and the
+Math). Unlike Presets they have no names, stay in the Meter rather than on this computer, cannot be exported, and can
+be written and read only through the remote interface (the front panel cannot store or recall). Choose a location, then:
+
+- **Store on Meter** writes the Meter's current Setup to location 1, 2 or 3 (`*SAV`), after asking, because it
+  overwrites what was there.
+- **Recall from Meter** replaces the Setup the Meter is using with the one in that location (`*RCL`), after asking,
+  and the window then shows the Setup the Meter is really in. Location 0 is the Meter's power-down state: it can be
+  recalled but not stored to. A location that was never stored is the Meter's error, shown instead of success.
+
+Nothing is ever stored or recalled by itself: not when connecting, changing the Setup or disconnecting (see
+[ADR-0004](docs/adr/0004-read-back-setup-on-connect.md)). The buttons are disabled without a Connection and while the
+Meter is busy with another change. A recalled Setup that uses a bus or external trigger is put back to one immediate
+Reading by the next Run or Single, as for a Preset. On the command line, use `save` and `recall` (see
+[Command line](#command-line)).
 
 ## Simulator
 

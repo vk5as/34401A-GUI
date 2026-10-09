@@ -861,6 +861,7 @@ def test_menus_follow_the_theme_including_ones_added_later(make_window):
 
 def press(widget: tk.Misc, key: str) -> None:
     """Send the key to `widget` as if typed there; Tk delivers key events to the widget that has focus."""
+    widget.update()  # Windows will not move focus to a widget that has not been mapped yet
     widget.focus_force()
     widget.update()
     widget.event_generate(f"<{key}>")

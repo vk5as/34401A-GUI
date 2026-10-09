@@ -75,7 +75,7 @@ def test_while_recording_the_window_shows_that_and_the_file_name_and_then_stops_
     path = tmp_path / "capture.csv"
     window = make_window()
     connect(window, path)
-    assert not window.recording.indicator.winfo_ismapped()
+    assert not window.recording.indicator.winfo_manager()
     assert window.recording.record_button.cget("text") == "Record"
 
     window.recording.record_button.invoke()
@@ -85,14 +85,14 @@ def test_while_recording_the_window_shows_that_and_the_file_name_and_then_stops_
     assert window.recording.path == path
     assert "REC" in str(window.recording.indicator.cget("text"))
     assert "capture.csv" in str(window.recording.indicator.cget("text"))
-    assert window.recording.indicator.winfo_ismapped()
+    assert window.recording.indicator.winfo_manager() == "pack"
     assert window.recording.record_button.cget("text") == "Stop"
 
     window.recording.record_button.invoke()
     window.root.update()
 
     assert not window.recording.active
-    assert not window.recording.indicator.winfo_ismapped()
+    assert not window.recording.indicator.winfo_manager()
     assert window.recording.record_button.cget("text") == "Record"
 
 

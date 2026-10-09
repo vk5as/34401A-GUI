@@ -241,7 +241,7 @@ def test_show_tab_brings_the_console_forward_and_focuses_its_entry(make_window):
     window.root.update()
 
     assert str(window.notebook.select()) == str(window.console.frame)
-    assert window.root.focus_get() is window.console.entry
+    assert window.root.focus_lastfor() is window.console.entry
 
 
 def test_show_tab_rejects_a_tab_that_does_not_exist(make_window):
@@ -271,7 +271,7 @@ def test_ctrl_k_brings_up_the_console_from_anywhere_and_lists_as_available(make_
     press(elsewhere, "Control-Key-k")
 
     assert str(window.notebook.select()) == str(window.console.frame)
-    assert window.root.focus_get() is window.console.entry
+    assert window.root.focus_lastfor() is window.console.entry
     window.show_shortcuts()
     listed = {str(table_row[0]): table_row[1:] for table_row in _rows(window)}
     assert listed["Ctrl+K"] == ("Open the SCPI console", "")

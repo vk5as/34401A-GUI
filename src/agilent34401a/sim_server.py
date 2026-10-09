@@ -6,6 +6,7 @@ stack. Run it standalone with `python -m agilent34401a.sim_server` or `agilent34
 
 import argparse
 import contextlib
+import ipaddress
 import math
 import socket
 import socketserver
@@ -134,8 +135,9 @@ class SimulatorServer:
 
     @property
     def resource_name(self) -> str:
-        """The VISA resource that reaches this server."""
-        return f"TCPIP::{self._host}::{self.port}::SOCKET"
+        """The VISA resource that reaches this server from this machine (a wildcard address is reached as loopback)."""
+        host = "127.0.0.1" if _is_wildcard(self._host) else self._host
+        return f"TCPIP::{host}::{self.port}::SOCKET"
 
     def inject(self, fault: Fault) -> None:
         """Arm a fault: from now on the server misbehaves as it describes, for every client, until `clear_faults`."""
@@ -223,6 +225,21 @@ def _fault(text: str) -> Fault:
         raise argparse.ArgumentTypeError(str(error)) from None
 
 
+def _is_wildcard(host: str) -> bool:
+    """Whether `host` means every interface, which is no address anybody can connect to."""
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return host == ""
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agilent34401a-sim",
@@ -259,8 +276,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as error:
         sys.stderr.write(f"agilent34401a-sim: error: cannot listen on {args.host}:{args.port}: {error}\n")
         return 1
+    if not _is_loopback(args.host):
+        sys.stderr.write(
+            f"agilent34401a-sim: warning: listening on {args.host or 'every interface'}, not just this machine. "
+            "There is no authentication and every connection gets a thread, so anyone who can reach this port can "
+            "use it. Use --host 127.0.0.1 (the default) unless you mean it.\n"
+        )
     try:
-        sys.stdout.write(f"Simulator listening on {server.resource_name}\n")
+        note = (
+            " (listening on all interfaces; from another machine use this machine's address)"
+            if _is_wildcard(args.host)
+            else ""
+        )
+        sys.stdout.write(f"Simulator listening on {server.resource_name}{note}\n")
         sys.stdout.flush()
         server.serve_forever()
     except KeyboardInterrupt:

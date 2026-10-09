@@ -155,6 +155,41 @@ def test_main_prints_the_resource_to_connect_to_and_serves_until_interrupted(mon
     assert out.startswith("Simulator listening on TCPIP::127.0.0.1::")
 
 
+def test_listening_on_every_interface_warns_and_names_a_resource_that_can_be_used(monkeypatch, capsys):
+    monkeypatch.setattr(SimulatorServer, "serve_forever", lambda _self: None)
+
+    assert main(["--host", "0.0.0.0", "--port", "0"]) == 0  # noqa: S104 - the point of the test
+
+    captured = capsys.readouterr()
+    assert "warning" in captured.err
+    assert "authentication" in captured.err
+    assert "TCPIP::0.0.0.0" not in captured.out  # nobody can connect to the address 0.0.0.0
+    assert "TCPIP::127.0.0.1::" in captured.out
+    assert "all interfaces" in captured.out
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_listening_on_the_loopback_address_gives_no_warning(monkeypatch, capsys, host):
+    monkeypatch.setattr(SimulatorServer, "serve_forever", lambda _self: None)
+
+    assert main(["--host", host, "--port", "0"]) == 0
+
+    assert capsys.readouterr().err == ""
+
+
+def test_listening_on_a_specific_outside_address_warns_but_names_that_address(monkeypatch, capsys):
+    monkeypatch.setattr(SimulatorServer, "serve_forever", lambda _self: None)
+    monkeypatch.setattr(SimulatorServer, "bind", lambda _self: None)
+    monkeypatch.setattr(SimulatorServer, "stop", lambda _self: None)
+    monkeypatch.setattr(SimulatorServer, "port", property(lambda _self: 5025))
+
+    assert main(["--host", "192.0.2.7", "--port", "5025"]) == 0
+
+    captured = capsys.readouterr()
+    assert "warning" in captured.err
+    assert "TCPIP::192.0.2.7::5025::SOCKET" in captured.out
+
+
 def test_main_stops_cleanly_on_ctrl_c(monkeypatch):
     def interrupt(_self):
         raise KeyboardInterrupt

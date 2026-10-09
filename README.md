@@ -418,7 +418,8 @@ agilent34401a-sim --port 5025 &
 agilent34401a-gui --backend py --resource "TCPIP::127.0.0.1::5025::SOCKET"
 ```
 
-Its options are `--host` (default 127.0.0.1), `--port` (default 5025; 0 picks any free one), `--identity` (`hp` or
+Its options are `--host` (default 127.0.0.1; anything else prints a warning, because the server has no authentication and
+starts a thread for every connection, so only listen beyond this machine on a network you trust), `--port` (default 5025; 0 picks any free one), `--identity` (`hp` or
 `agilent`, which firmware to pretend to be), `--time-scale` (1 is real time, 0 is instant) and `--fault`. The
 `AGILENT34401A_SIM_TIME_SCALE` environment variable sets the time scale of the in-process Simulator in the same way.
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from agilent34401a import __version__, cli_admin, cli_log, cli_raw, cli_serial
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings, open_transport
-from agilent34401a.driver import Driver, QueuedError
+from agilent34401a.driver import RECALL_LOCATIONS, STORE_LOCATIONS, Driver, QueuedError
 from agilent34401a.errors import InvalidSetupError, MeterError
 from agilent34401a.meter import Function, Resolution, Setup, format_reading, reading_timeout
 from agilent34401a.sim import Simulator
@@ -48,6 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_raw_command(subparsers)
     _add_log_command(subparsers)
     _add_admin_commands(subparsers)
+    _add_memory_commands(subparsers)
     _add_probe_command(subparsers)
 
     args = parser.parse_args(argv)
@@ -173,6 +174,46 @@ def _add_admin_commands(subparsers: "argparse._SubParsersAction[argparse.Argumen
     for name, action, summary, description in commands:
         parser = add_command(subparsers, name, partial(_run_admin, action), summary=summary, description=description)
         add_connection_options(parser)
+
+
+def _add_memory_commands(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Register `save` and `recall`, which use the Meter's own Meter Memory; what they do lives in `cli_admin`."""
+    commands = (
+        (
+            "save",
+            cli_admin.save,
+            STORE_LOCATIONS,
+            "store the Meter's Setup in Meter Memory location 1 to 3 (*SAV)",
+            (
+                "Store the Meter's whole Setup in one of its own numbered, unnamed Meter Memory locations, overwriting "
+                "what was there. Location 0 is the Meter's power-down state and cannot be stored to."
+            ),
+        ),
+        (
+            "recall",
+            cli_admin.recall,
+            RECALL_LOCATIONS,
+            "replace the Meter's Setup with Meter Memory location 0 to 3 (*RCL)",
+            (
+                "Replace the Meter's Setup with the one in a Meter Memory location (0 is its power-down state), then "
+                "read back and print the Setup it is in. A location that was never stored is an error."
+            ),
+        ),
+    )
+    for name, action, locations, summary, description in commands:
+        parser = add_command(subparsers, name, partial(_run_memory, action), summary=summary, description=description)
+        parser.add_argument(
+            "location",
+            type=int,
+            choices=locations,
+            metavar="LOCATION",
+            help=f"the Meter Memory location, {locations.start} to {locations[-1]}",
+        )
+        add_connection_options(parser)
+
+
+def _run_memory(action: Callable[[Driver, int], int], args: argparse.Namespace) -> int:
+    return run_on_meter(args, lambda driver, _transport: action(driver, args.location))
 
 
 def _run_admin(action: Callable[[Driver], int], args: argparse.Namespace) -> int:

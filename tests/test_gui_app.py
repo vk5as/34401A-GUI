@@ -1,6 +1,5 @@
 import _tkinter
 import gc
-import os
 import re
 import threading
 import time
@@ -252,7 +251,7 @@ def test_a_failed_connection_is_reported_and_leaves_the_window_usable(make_windo
     assert window.readout.cget("text") == NO_READING
 
 
-def test_a_device_that_is_not_a_34401a_is_refused(make_window):
+def test_a_meter_that_does_not_identify_as_a_34401a_is_refused(make_window):
     window = make_window(Simulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01"))
 
     pump(window, lambda: window.status_connection.cget("text").startswith("Connection failed"))
@@ -696,19 +695,15 @@ def test_the_window_manager_close_button_closes_the_window_cleanly(make_window):
     assert window.worker_is_alive() is False
 
 
+@pytest.mark.usefixtures("tk_root")
 def test_running_the_app_with_simulate_shows_a_window_and_returns_success_when_it_is_closed(monkeypatch):
+    # `main` makes the application's own root, as it must; `tk_root` is here to skip when there is no display.
     shown_titles = []
 
     def close_immediately(self, _n=0):
         shown_titles.append(self.title())
         self.destroy()
 
-    try:
-        tk.Tk().destroy()
-    except tk.TclError:
-        if os.environ.get("CI"):
-            raise
-        pytest.skip("no display available")
     monkeypatch.setattr(tk.Tk, "mainloop", close_immediately)
 
     assert main(["--simulate"]) == 0
@@ -866,6 +861,40 @@ def test_choosing_a_theme_in_the_view_menu_restyles_the_window_at_once_and_saves
         assert str(window.root.cget("background")) == "#232629"
         assert settings.theme is Theme.DARK
         assert Settings.load(tmp_path).theme is Theme.DARK
+    finally:
+        window.close()
+
+
+def _unwritable_settings(tmp_path) -> Settings:
+    """Settings whose folder cannot be made, because a file is in the way (true on every OS, whoever runs the test)."""
+    (tmp_path / "in-the-way").write_text("a file", encoding="utf-8")
+    return Settings.load(tmp_path / "in-the-way" / "folder")
+
+
+def test_a_theme_is_still_applied_when_the_settings_cannot_be_saved_and_the_status_bar_says_so(tk_root, tmp_path):
+    window = _window_with(tk_root, _unwritable_settings(tmp_path))
+    heard = []
+    try:
+        window.on_theme_changed(lambda palette: heard.append(palette.name))
+
+        window.set_theme(Theme.DARK)
+
+        assert heard == ["System", "Dark"]  # the callbacks (the chart's colours) still ran
+        assert str(window.root.cget("background")) == "#232629"
+        assert "Could not save the settings" in str(window.status_error.cget("text"))
+    finally:
+        window.close()
+
+
+def test_compact_mode_is_still_laid_out_when_the_settings_cannot_be_saved(tk_root, tmp_path):
+    window = _window_with(tk_root, _unwritable_settings(tmp_path))
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+
+        window.set_compact(compact=True)
+
+        assert not any(_shown(window.setup_label, window.raw_check, window.notebook))
+        assert "Could not save the settings" in str(window.status_error.cget("text"))
     finally:
         window.close()
 
@@ -1225,19 +1254,15 @@ def test_the_window_leaves_the_collector_alone_while_automatic_collection_is_on(
     assert collections == []
 
 
+@pytest.mark.usefixtures("tk_root")
 def test_running_the_app_turns_automatic_collection_off_for_the_life_of_the_window_only(monkeypatch):
+    # `main` makes the application's own root, as it must; `tk_root` is here to skip when there is no display.
     seen = []
 
     def run_and_note(self, _n=0):
         seen.append(gc.isenabled())
         self.destroy()
 
-    try:
-        tk.Tk().destroy()
-    except tk.TclError:
-        if os.environ.get("CI"):
-            raise
-        pytest.skip("no display available")
     monkeypatch.setattr(tk.Tk, "mainloop", run_and_note)
     was_enabled = gc.isenabled()
     gc.enable()

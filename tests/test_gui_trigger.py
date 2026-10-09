@@ -99,16 +99,26 @@ def test_nothing_can_be_started_before_the_meter_is_connected_and_the_tooltips_s
 
 def test_the_controls_start_from_the_trigger_settings_the_meter_already_has(make_window):
     simulator = TriggeringSimulator()
-    for command in ("TRIG:SOUR BUS", "TRIG:DEL 0.25", "SAMP:COUN 30", "TRIG:COUN 4"):
-        simulator.write(command)
+    simulator.write("TRIG:DEL 0.25")  # Continuous, which starts on connect, leaves a fixed Trigger Delay alone
     window = make_window(simulator)
     pump(window, lambda: connected(window))
 
-    assert tab(window).settings == TriggerSettings(TriggerSource.BUS, 0.25, 30, 4)
-    assert tab(window).source_var.get() == "BUS"
+    assert tab(window).settings == TriggerSettings(TriggerSource.IMMEDIATE, 0.25, 1, 1)
+    assert tab(window).source_var.get() == "IMM"
     assert tab(window).delay_entry.get() == "0.25"
-    assert tab(window).sample_entry.get() == "30"
-    assert tab(window).trigger_entry.get() == "4"
+    assert tab(window).sample_entry.get() == "1"
+    assert tab(window).trigger_entry.get() == "1"
+
+
+def test_the_controls_show_the_one_immediate_reading_that_continuous_puts_a_burst_setup_back_to(make_window):
+    simulator = TriggeringSimulator()
+    for command in ("TRIG:SOUR BUS", "TRIG:DEL 0.25", "SAMP:COUN 30", "TRIG:COUN 4"):
+        simulator.write(command)
+    window = make_window(simulator)
+
+    pump(window, lambda: connected(window) and tab(window).source_var.get() == "IMM")
+
+    assert tab(window).settings == TriggerSettings(TriggerSource.IMMEDIATE, 0.25, 1, 1)
 
 
 def test_a_reset_meter_shows_an_automatic_delay_and_one_reading(make_window):
@@ -120,17 +130,15 @@ def test_a_reset_meter_shows_an_automatic_delay_and_one_reading(make_window):
     assert state(tab(window).start_button) == "normal"
 
 
-def test_the_delay_can_be_fixed_and_the_trigger_count_infinite(make_window):
+def test_the_delay_can_be_fixed(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
     tab(window).delay_fixed_button.invoke()
     type_into(window, tab(window).delay_entry, "1.5")
-    tab(window).infinite_check.invoke()
 
     assert state(tab(window).delay_entry) == "normal"
-    assert state(tab(window).trigger_entry) == "disabled"
-    assert tab(window).settings == TriggerSettings(delay=1.5, trigger_count=None)
+    assert tab(window).settings == TriggerSettings(delay=1.5)
 
 
 # --- refusing bad settings before starting -------------------------------------------------------------------------
@@ -184,14 +192,24 @@ def test_a_delay_outside_zero_to_an_hour_disables_start(make_window):
     assert "Trigger Delay" in tab(window).tooltips["start"].text
 
 
-def test_an_infinite_trigger_count_cannot_be_a_burst(make_window):
+def test_there_is_no_control_that_offers_an_infinite_trigger_count(make_window):
+    window = make_window()
+
+    assert not hasattr(tab(window), "infinite_check")  # a Burst with one always fails, so it is not offered
+
+
+def test_an_infinite_trigger_count_a_preset_has_is_shown_and_cannot_be_a_burst(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
-    tab(window).infinite_check.invoke()
+    tab(window).set_settings(TriggerSettings(trigger_count=None))
 
+    assert tab(window).trigger_entry.get() == "infinite"
+    assert tab(window).settings.trigger_count is None
     assert state(tab(window).start_button) == "disabled"
     assert "Trigger Count" in tab(window).tooltips["start"].text
+    type_into(window, tab(window).trigger_entry, "3")  # typing a number brings the Burst back
+    assert state(tab(window).start_button) == "normal"
 
 
 # --- Single ----------------------------------------------------------------------------------------------------------

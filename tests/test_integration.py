@@ -210,6 +210,20 @@ def test_the_cli_changes_function_and_range_over_the_real_stack(server, capsys):
     assert capsys.readouterr().out == "1.000000 kΩ\n"
 
 
+def test_a_setup_saved_with_the_cli_is_still_in_the_meter_for_a_later_recall_over_the_real_stack(server, capsys):
+    connection = ["--backend", "py", "--resource", server.resource_name]
+    assert main(["read", *connection, "--function", "res", "--range", "1000"]) == 0
+    assert main(["save", "2", *connection]) == 0
+    assert main(["read", *connection, "--function", "dcv", "--range", "10"]) == 0
+    capsys.readouterr()
+
+    assert main(["recall", "2", *connection]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("Recalled Meter Memory location 2: 2-wire Ω")
+    assert "1 kΩ range" in out
+
+
 def test_the_cli_reports_a_meter_that_refuses_a_setting_over_the_real_stack(server, capsys):
     assert (
         main(["read", "--backend", "py", "--resource", server.resource_name, "--function", "dcv", "--range", "5000"])

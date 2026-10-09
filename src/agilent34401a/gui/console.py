@@ -2,7 +2,7 @@
 
 The tab never touches the Meter. It hands each command to `send`, which goes to the Worker (ADR-0002), and shows
 what comes back through `handle_event`. Whether a command is a calibration write is decided by the Worker
-(ADR-0006); the tab only passes on whether the override is ticked.
+(ADR-0006); the tab only passes on whether the override is ticked, and unticks it again after every command.
 """
 
 import tkinter as tk
@@ -96,7 +96,9 @@ class ConsoleTab:
         self._draft = ""
         self.entry.delete(0, "end")
         self._show(f"> {command}", "command")
-        self._send(command, bool(self.allow_calibration.get()))
+        allowed = bool(self.allow_calibration.get())
+        self.allow_calibration.set(value=False)  # the override is for this command only
+        self._send(command, allowed)
 
     def clear(self) -> None:
         """Empty the output; the history stays."""

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 
 from agilent34401a import __version__
 from agilent34401a.cli import add_connection_options, connection_settings
+from agilent34401a.cli_serial import serial_options_given
 from agilent34401a.connection import ConnectionSettings
 from agilent34401a.gui.connection_dialog import Detect, Scan
 from agilent34401a.gui.main_window import MainWindow, MakeOpener
@@ -32,8 +33,13 @@ def startup_connection(
 
     The remembered Connection is only used when the user has switched on reconnecting at startup.
     """
-    given = args.simulate or any(
-        value is not None for value in (args.backend, args.gpib_board, args.gpib_address, args.resource)
+    given = (
+        args.simulate
+        or any(
+            value is not None
+            for value in (args.backend, args.gpib_board, args.gpib_address, args.resource, args.serial_port)
+        )
+        or bool(serial_options_given(args))
     )
     if given:
         chosen = connection_settings(args, parser)

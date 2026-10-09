@@ -17,13 +17,13 @@ DEFAULT_HISTORY_LENGTH = 10_000
 class HistoryEntry:
     """One Reading in the History.
 
-    `sample` counts Readings from 1 since the History was last cleared, so it does not change when older Readings
+    `number` counts Readings from 1 since the History was last cleared, so it does not change when older Readings
     are forgotten. `timestamp` is the `time.monotonic()` seconds the Worker stamped on the Reading. A True
     `follows_break` means a Break Marker sits just before this Reading. `setup` and `taken_at` (the wall-clock time)
     are what a CSV export needs besides the Reading itself; they are None for a Reading added without them.
     """
 
-    sample: int
+    number: int
     reading: Reading
     timestamp: float
     follows_break: bool = False
@@ -137,7 +137,7 @@ class History:
         return entry
 
     def clear(self) -> None:
-        """Forget every Reading and start counting samples from 1 again."""
+        """Forget every Reading and start counting Readings from 1 again."""
         self._entries.clear()
         self._count = 0
         self._started_at = None

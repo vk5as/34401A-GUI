@@ -9,6 +9,7 @@ Nothing here is specific to the Transport.
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 from agilent34401a.math_operations import (
     DEFAULT_DBM_RESISTANCE,
@@ -19,9 +20,9 @@ from agilent34401a.math_operations import (
     MIN_DBM_RESISTANCE,
     MathOperation,
 )
-from agilent34401a.meter import Function
+from agilent34401a.meter import OVERLOAD_MAGNITUDE, Function
+from agilent34401a.sim_common import number_reply, parse_number
 
-_OVERLOAD_MAGNITUDE = 9.9e37
 _MILLIWATT = 1e-3
 _DECIBEL_LIMIT = 200.0
 _QUESTIONABLE_SUMMARY_BIT = 8  # bit 3 of the status byte: the Questionable Data register has an enabled bit set
@@ -43,18 +44,6 @@ _OPERATIONS = {
     "LIMIT": MathOperation.LIMIT_TEST,
 }
 _STATISTICS_QUERIES = ("CALC:AVER:MIN", "CALC:AVER:MAX", "CALC:AVER:AVER", "CALC:AVER:COUN")
-
-
-def _number(word: str) -> float | None:
-    try:
-        value = float(word)
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _number_reply(value: float) -> str:
-    return f"{value + 0.0:+.8E}"
 
 
 def _applies(operation: MathOperation, function: Function) -> bool:
@@ -80,6 +69,19 @@ class MathUnit:
         self._dbm_resistance = DEFAULT_DBM_RESISTANCE
         self._limit_lower = 0.0
         self._limit_upper = 0.0
+        self._questionable_condition = 0
+        self._clear_statistics()
+
+    _SAVED = ("_operation", "_on", "_null_offset", "_db_reference", "_dbm_resistance", "_limit_lower", "_limit_upper")
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return the Math settings for Meter Memory (`*SAV`). The Statistics gathered so far are not part of a Setup."""
+        return {name: getattr(self, name) for name in self._SAVED}
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """Put back what `snapshot` took (`*RCL`); the Statistics start again and latched Limit Test failures go."""
+        for name, value in snapshot.items():
+            setattr(self, name, value)
         self._questionable_condition = 0
         self._clear_statistics()
 
@@ -133,7 +135,7 @@ class MathUnit:
         """Apply the Operation in effect to a Reading the Meter measured, and return what it sends."""
         if not self._on:
             return value
-        overload = abs(value) >= _OVERLOAD_MAGNITUDE
+        overload = abs(value) >= OVERLOAD_MAGNITUDE
         match self._operation:
             case MathOperation.NULL if not overload:
                 if self._null_offset is None:
@@ -189,7 +191,7 @@ class MathUnit:
             "CALC:AVER:AVER": average,
             "CALC:AVER:COUN": float(self._count),
         }
-        return _number_reply(values[key])
+        return number_reply(values[key])
 
     def _function_command(self, *, query: bool, word: str, function: Function) -> None:
         if query:
@@ -225,15 +227,15 @@ class MathUnit:
 
     def _null_offset_command(self, *, query: bool, word: str) -> None:
         if query:
-            self._reply(_number_reply(self._null_offset or 0.0))
-        elif (value := _number(word)) is None:
+            self._reply(number_reply(self._null_offset or 0.0))
+        elif (value := parse_number(word)) is None:
             self._error(_MISSING_PARAMETER if not word else _ILLEGAL_PARAMETER)
         else:
             self._null_offset = value
 
     def _db_reference_command(self, *, query: bool, word: str) -> None:
         if query:
-            self._reply(_number_reply(self._db_reference))
+            self._reply(number_reply(self._db_reference))
             return
         value = self._choose(word, minimum=-MAX_DB_REFERENCE, maximum=MAX_DB_REFERENCE, default=0.0)
         if value is not None:
@@ -241,7 +243,7 @@ class MathUnit:
 
     def _dbm_reference_command(self, *, query: bool, word: str) -> None:
         if query:
-            self._reply(_number_reply(self._dbm_resistance))
+            self._reply(number_reply(self._dbm_resistance))
             return
         value = self._choose(
             word, minimum=MIN_DBM_RESISTANCE, maximum=MAX_DBM_RESISTANCE, default=DEFAULT_DBM_RESISTANCE
@@ -254,7 +256,7 @@ class MathUnit:
         if not word:
             self._error(_MISSING_PARAMETER)
             return None
-        value = {"MIN": minimum, "MAX": maximum, "DEF": default}.get(word, _number(word))
+        value = {"MIN": minimum, "MAX": maximum, "DEF": default}.get(word, parse_number(word))
         if value is None:
             self._error(_ILLEGAL_PARAMETER)
         elif not minimum <= value <= maximum:
@@ -265,8 +267,8 @@ class MathUnit:
 
     def _limit_command(self, attribute: str, *, query: bool, word: str) -> None:
         if query:
-            self._reply(_number_reply(getattr(self, attribute)))
-        elif (value := _number(word)) is None:
+            self._reply(number_reply(getattr(self, attribute)))
+        elif (value := parse_number(word)) is None:
             self._error(_MISSING_PARAMETER if not word else _ILLEGAL_PARAMETER)
         else:
             setattr(self, attribute, value)
@@ -275,7 +277,7 @@ class MathUnit:
         if query:
             self._reply(f"+{self._questionable_enable}")
             return
-        value = _number(word)
+        value = parse_number(word)
         if value is None:
             self._error(_ILLEGAL_PARAMETER)
         elif not 0 <= value <= _MAX_STATUS_REGISTER:

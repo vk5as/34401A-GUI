@@ -14,8 +14,9 @@ _MIN_PREFIX_EXPONENT = min(_PREFIXES)
 _MAX_PREFIX_EXPONENT = max(_PREFIXES)
 _PREFIX_STEP = 3
 
-# The Meter reports Overload as +/-9.9E+37; anything at or beyond this magnitude is an Overload.
-_OVERLOAD_MAGNITUDE = 9.9e37
+# The Meter reports Overload as +/-9.9E+37; anything at or beyond this magnitude is an Overload. It also says an
+# infinite Trigger Count that way.
+OVERLOAD_MAGNITUDE = 9.9e37
 
 _LINE_FREQUENCY_HZ = 50
 _AUTOZERO_FACTOR = 2  # with Autozero on, every Reading is an offset measurement plus the signal measurement
@@ -453,9 +454,13 @@ _AUTORANGE_STEPS = 5  # Autorange may measure at several Ranges before it settle
 
 
 def reading_timeout(setup: Setup) -> float:
-    """Seconds to wait for a Reading in this Setup before giving up (ADR-0002)."""
+    """Seconds to wait for a Reading in this Setup before giving up (ADR-0002).
+
+    A fixed Trigger Delay is waited out before every Reading (Single and Continuous keep it), so it counts in full.
+    """
     steps = _AUTORANGE_STEPS if setup.range is None and setup.function.ranges else 1
-    return max(_MIN_TIMEOUT_S, measurement_time(setup) * steps * _TIMEOUT_MARGIN + _TIMEOUT_EXTRA_S)
+    delay = setup.trigger.delay or 0.0
+    return max(_MIN_TIMEOUT_S, (delay + measurement_time(setup) * steps) * _TIMEOUT_MARGIN + _TIMEOUT_EXTRA_S)
 
 
 @dataclass(frozen=True)
@@ -481,7 +486,7 @@ class Reading:
 
     @property
     def is_overload(self) -> bool:
-        return abs(self.value) >= _OVERLOAD_MAGNITUDE
+        return abs(self.value) >= OVERLOAD_MAGNITUDE
 
 
 def parse_reading(raw: str, function: Function) -> Reading:

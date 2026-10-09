@@ -265,7 +265,7 @@ def test_a_setup_change_that_failed_is_reported_as_a_failure_of_the_preset():
     applier = PresetApplier(lambda _setup: True, reports.append)
     applier.apply(AC_PRESET)
 
-    applier.handle(SetupFailed("Timed out"))
+    applier.handle(SetupFailed("Timed out", requested=AC_PRESET.setup))
 
     assert len(reports) == 1
     assert not reports[0].applied
@@ -301,9 +301,34 @@ def test_a_second_preset_waits_until_the_first_has_been_answered():
 
     assert is_busy(applier)
     assert not applier.apply(FULL_PRESET)
-    applier.handle(SetupChanged(AC_PRESET.setup))
+    applier.handle(SetupChanged(AC_PRESET.setup, requested=AC_PRESET.setup))
     assert not is_busy(applier)
     assert applier.apply(FULL_PRESET)
+
+
+def test_a_setup_change_that_was_not_the_answer_to_the_preset_is_not_taken_for_it(session):
+    running = session()
+    running.worker.send_raw("VOLT:DC:NPLC 10")  # its SetupChanged reaches the window before the Preset's does
+    running.reports.clear()
+    assert running.applier.apply(AC_PRESET)
+    running.worker.single()
+
+    running.pump_until_reading()
+
+    assert len(running.reports) == 1
+    assert running.reports[0].applied
+    assert running.reports[0].actual == AC_PRESET.setup
+
+
+def test_a_setup_failure_that_was_not_the_presets_is_not_taken_for_its_failure():
+    reports: list[ApplyReport] = []
+    applier = PresetApplier(lambda _setup: True, reports.append)
+    applier.apply(AC_PRESET)
+
+    applier.handle(SetupFailed("Timed out", requested=FULL_SETUP))  # some other request's failure
+
+    assert reports == []
+    assert applier.busy
 
 
 def test_a_setup_change_nobody_asked_for_by_a_preset_is_not_a_report():

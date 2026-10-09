@@ -233,14 +233,21 @@ class VisaTransport:
     def set_local_lockout(self, *, locked: bool) -> bool:
         """Send the GPIB local lockout message, or release it; False on any other bus, which has no such message.
 
-        Releasing sends GTL with REN deasserted, then asserts REN again so the next command finds the Meter in Remote.
+        Locking asserts REN, addresses the Meter and sends Local Lockout in one VISA call. Releasing drops REN while
+        addressing the Meter to go to Local, which ends the lockout, then asserts REN again so the next command finds
+        the Meter in Remote. pyvisa's resources have `control_ren` for this (`gpib_control_ren` belongs to the VISA
+        library behind them); a GPIB resource without it is an error, because `SYST:RWL` is RS-232 only and a real
+        Meter on GPIB would reject it.
         """
-        control = getattr(self._resource, "gpib_control_ren", None)
-        if not self._gpib or not callable(control):
+        if not self._gpib:
             return False
         self._require_open()
+        control = getattr(self._resource, "control_ren", None)
+        if not callable(control):
+            message = "This VISA resource cannot control the GPIB REN line, so the front panel cannot be locked out"
+            raise TransportError(message)
         operations = (
-            [constants.RENLineOperation.asrt_llo]
+            [constants.RENLineOperation.asrt_address_llo]
             if locked
             else [constants.RENLineOperation.deassert_gtl, constants.RENLineOperation.asrt]
         )

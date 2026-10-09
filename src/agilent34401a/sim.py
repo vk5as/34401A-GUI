@@ -6,12 +6,15 @@ import random
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 from agilent34401a.applied_signal import AppliedSignal
 from agilent34401a.errors import TransportError, TransportTimeoutError
 from agilent34401a.meter import (
     NPLC_VALUES,
+    OVERLOAD_MAGNITUDE,
     AcFilter,
     Autozero,
     Function,
@@ -21,8 +24,10 @@ from agilent34401a.meter import (
     Terminals,
     measurement_time,
 )
+from agilent34401a.sim_common import number_reply, parse_number
 from agilent34401a.sim_math import MathUnit
 from agilent34401a.sim_trigger import SimHost, TriggerModel
+from agilent34401a.trigger import TriggerSettings
 
 HEWLETT_PACKARD_IDENTITY = "HEWLETT-PACKARD,34401A,0,10-5-2"
 AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
@@ -30,7 +35,6 @@ AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
 TIME_SCALE_ENV_VAR = "AGILENT34401A_SIM_TIME_SCALE"
 """Overrides the default time scale: 1 is real time, 0 is instant."""
 
-_OVERLOAD_VALUE = 9.9e37
 _OVER_RANGE = 1.2  # most ranges read up to 120 % of their full scale
 # These ranges cannot be exceeded: the 1000 V and 750 V limits are safety limits, and 3 A is the fuse.
 _NO_OVER_RANGE = frozenset(
@@ -48,6 +52,9 @@ _ILLEGAL_PARAMETER = '-224,"Illegal parameter value"'
 _DATA_OUT_OF_RANGE = '-222,"Data out of range"'
 _COMMAND_PROTECTED = '-203,"Command protected"'
 _SELF_TEST_FAILED = '-330,"Self-test failed"'
+_MEMORY_LOST = '-314,"Save/recall memory lost"'
+METER_MEMORY_LOCATIONS = range(4)
+"""The Meter Memory locations `*RCL` accepts: 0 is the power-down state, 1 to 3 are the user's (`*SAV` takes only those)."""
 
 SCPI_VERSION = "1994.0"
 SELF_TEST_DURATION_S = 10.0
@@ -111,6 +118,8 @@ _LONG_FORMS = {
     "DISPLAY": "DISP",
     "CLEAR": "CLE",
     "CALIBRATION": "CAL",
+    "CONFIGURE": "CONF",
+    "MEASURE": "MEAS",
     "COUNT": "COUN",
     "STRING": "STR",
     "RWLOCK": "RWL",
@@ -193,6 +202,21 @@ _CONTINUITY_LIMIT = 1.2e3
 _DIODE_LIMIT = 1.2
 
 
+@dataclass(frozen=True)
+class _Stored:
+    """One location of Meter Memory: everything `*SAV` keeps of the Simulator's Setup."""
+
+    function: Function
+    ranges: dict[Function, float | None]
+    nplc: dict[Function, float]
+    ac_filter: AcFilter
+    autozero: Autozero
+    input_impedance: InputImpedance
+    gate_times: dict[Function, GateTime]
+    trigger: TriggerSettings
+    math: dict[str, Any]
+
+
 class Simulator:
     """One simulated Meter, driven through the same text interface as a real one.
 
@@ -261,6 +285,9 @@ class Simulator:
         )
         self._math = MathUnit(self._reply, self._errors.append)
         self._reset()
+        # Meter Memory survives `*RST`. Location 0 holds the power-down state, which starts as the reset state; the
+        # others are empty until something is stored there.
+        self._meter_memory: dict[int, _Stored] = {0: self._store()}
 
     @property
     def signal_time(self) -> float:
@@ -306,6 +333,8 @@ class Simulator:
             self._reply(self._errors.popleft() if self._errors else _NO_ERROR)
         elif key == "FUNC":
             self._function_command(query=query, argument=argument)
+        elif path[0] in ("CONF", "MEAS"):
+            self._configure_command(path, query=query, argument=argument)
         elif self._math.handles(key):
             if not self._math.command(key, query=query, argument=argument, function=self._function):
                 self._errors.append(_UNDEFINED_HEADER)
@@ -331,6 +360,8 @@ class Simulator:
                 self._math.clear_status()
             case "*RST":
                 self._reset()
+            case "*SAV" | "*RCL":
+                self._meter_memory_command(header, argument)
             case "*STB?":
                 status = (_ERROR_QUEUE_STATUS_BIT if self._errors else 0) | self._trigger.status_bits()
                 self._reply(str(status | self._math.status_byte_bits))
@@ -341,6 +372,52 @@ class Simulator:
                 self._reply("+0" if passed else "+1", SELF_TEST_DURATION_S)
             case _:
                 self._errors.append(_UNDEFINED_HEADER)
+
+    def _store(self) -> "_Stored":
+        """Copy the whole Setup the Simulator models: active Function, each Function's settings, trigger and Math."""
+        return _Stored(
+            function=self._function,
+            ranges=dict(self._ranges),
+            nplc=dict(self._nplc),
+            ac_filter=self._ac_filter,
+            autozero=self._autozero,
+            input_impedance=self._input_impedance,
+            gate_times=dict(self._gate_times),
+            trigger=self._trigger.snapshot(),
+            math=self._math.snapshot(),
+        )
+
+    def _recall(self, stored: "_Stored") -> None:
+        self._function = stored.function
+        self._ranges = dict(stored.ranges)
+        self._nplc = dict(stored.nplc)
+        self._ac_filter = stored.ac_filter
+        self._autozero = stored.autozero
+        self._input_impedance = stored.input_impedance
+        self._gate_times = dict(stored.gate_times)
+        self._trigger.restore(stored.trigger)
+        self._math.restore(stored.math)
+
+    def _meter_memory_command(self, header: str, argument: str) -> None:
+        """`*SAV n` stores the Setup in location 1 to 3; `*RCL n` puts back location 0 to 3."""
+        if not argument:
+            self._errors.append(_MISSING_PARAMETER)
+            return
+        number = parse_number(argument)
+        if number is None:
+            self._errors.append(_ILLEGAL_PARAMETER)
+            return
+        writing = header == "*SAV"
+        location = int(number)
+        lowest = 1 if writing else 0
+        if number != location or not lowest <= location <= METER_MEMORY_LOCATIONS[-1]:
+            self._errors.append(_DATA_OUT_OF_RANGE)
+        elif writing:
+            self._meter_memory[location] = self._store()
+        elif location not in self._meter_memory:
+            self._errors.append(_MEMORY_LOST)
+        else:
+            self._recall(self._meter_memory[location])
 
     def _system_command(self, key: str, *, query: bool, argument: str) -> bool:
         """Handle the beeper, display, version, front panel and calibration commands; False when `key` is not one."""
@@ -357,7 +434,7 @@ class Simulator:
             "SYST:BEEP": self._beep,
             "SYST:BEEP:STAT": lambda: self._switch_command("beeper_enabled", query=query, argument=argument),
             "SYST:RWL": lambda: setattr(self, "front_panel_locked", True),
-            "SYST:LOC": self.go_to_local,  # the RS-232 way back to Local: front panel and Local key included
+            "SYST:LOC": self._local_command,  # the RS-232 way back to Local: front panel and Local key included
             "SYST:REM": lambda: None,
             "DISP": lambda: self._switch_command("display_on", query=query, argument=argument),
             "DISP:TEXT": lambda: self._display_text_command(query=query, argument=argument),
@@ -405,6 +482,39 @@ class Simulator:
             if function is not self._function:
                 self._math.function_changed()  # the Meter turns its Math Operation off with a change of Function
             self._function = function
+
+    def _configure_command(self, path: tuple[str, ...], *, query: bool, argument: str) -> None:
+        """`CONF:<function> [range]` selects a Function with its defaults; `MEAS:<function>? [range]` also reads it.
+
+        The defaults are autorange (or the given Range), the default Integration Time and an immediate trigger of one
+        Reading, with Math off. A resolution (the optional second parameter) is not modelled and is refused rather than
+        ignored, and `CONF?` is not modelled either. A refused command leaves the Meter as it was.
+        """
+        measuring = path[0] == "MEAS"
+        function = _FUNCTION_NAMES.get(":".join(path[1:]))
+        if function is None or query != measuring:
+            self._errors.append(_UNDEFINED_HEADER)
+            return
+        words = [word.strip().upper() for word in argument.split(",")] if argument else []
+        if len(words) > 1:
+            self._errors.append(_ILLEGAL_PARAMETER)
+            return
+        before, queued = self._store(), len(self._errors)
+        group = Function.DC_VOLTAGE if function is Function.DC_VOLTAGE_RATIO else function
+        self._function = function
+        self._math.function_changed()
+        self._trigger.restore(TriggerSettings())
+        if group in self._ranges:
+            self._ranges[group] = None
+            if words:
+                self._set_range(group, words[0])
+        if group in self._nplc:
+            self._nplc[group] = Setup.default(group).nplc or 0
+        if len(self._errors) > queued:
+            self._recall(before)  # whatever the Meter refused, it did not half-do
+            return
+        if measuring:
+            self._trigger.command("READ", query=True, argument="")
 
     def _setting_command(self, path: tuple[str, ...], *, query: bool, argument: str) -> bool:
         """Handle `<group>:RANG`, `<group>:RANG:AUTO` and `<group>:NPLC`; False when the header is not one."""
@@ -455,7 +565,7 @@ class Simulator:
     def _choose(self, word: str, choices: Sequence[float]) -> float | None:
         """Pick from `choices`, which are in ascending order: a value between two selects the next one up."""
         shortcuts = {"MIN": choices[0], "MAX": choices[-1], "DEF": choices[1]}
-        value = shortcuts.get(word, _number(word))
+        value = shortcuts.get(word, parse_number(word))
         if value is None:
             self._errors.append(_ILLEGAL_PARAMETER)
             return None
@@ -471,7 +581,7 @@ class Simulator:
             self._ac_filter = AcFilter(chosen)
 
     def _get_ac_filter(self) -> str:
-        return _number_reply(self._ac_filter.hertz)
+        return number_reply(self._ac_filter.hertz)
 
     def _set_gate_time(self, function: Function, word: str) -> None:
         chosen = self._choose(word, [gate_time.value for gate_time in GateTime])
@@ -479,7 +589,7 @@ class Simulator:
             self._gate_times[function] = GateTime(chosen)
 
     def _get_gate_time(self, function: Function) -> str:
-        return _number_reply(self._gate_times[function].seconds)
+        return number_reply(self._gate_times[function].seconds)
 
     def _set_autozero(self, word: str) -> None:
         if word in ("ON", "1"):
@@ -513,7 +623,7 @@ class Simulator:
         elif word == "DEF":
             self._ranges[function] = None
         else:
-            value = _number(word)
+            value = parse_number(word)
             if value is None:
                 self._errors.append(_ILLEGAL_PARAMETER)
                 return
@@ -526,7 +636,7 @@ class Simulator:
 
     def _get_range(self, function: Function) -> str:
         fixed = self._ranges[function]
-        return _number_reply(fixed if fixed is not None else self._autorange(function))
+        return number_reply(fixed if fixed is not None else self._autorange(function))
 
     def _set_autorange(self, function: Function, word: str) -> None:
         if word in ("ON", "1"):
@@ -543,14 +653,14 @@ class Simulator:
 
     def _set_nplc(self, function: Function, word: str) -> None:
         shortcuts = {"MIN": NPLC_VALUES[0], "MAX": NPLC_VALUES[-1], "DEF": 10}
-        value = shortcuts.get(word, _number(word))
+        value = shortcuts.get(word, parse_number(word))
         if value is None or value not in NPLC_VALUES:
             self._errors.append(_ILLEGAL_PARAMETER)
         else:
             self._nplc[function] = value
 
     def _get_nplc(self, function: Function) -> str:
-        return _number_reply(self._nplc[function])
+        return number_reply(self._nplc[function])
 
     def _setup(self) -> Setup:
         """Return the Setup the Meter is in right now, as the Meter model describes it."""
@@ -584,7 +694,7 @@ class Simulator:
 
     def _measure(self, setup: Setup) -> str:
         """Take a Reading and return the Meter's reply: the measured value, or the Math Operation's result."""
-        return _number_reply(self._math.process(self._measured_value(setup)))
+        return number_reply(self._math.process(self._measured_value(setup)))
 
     def _measured_value(self, setup: Setup) -> float:
         function = setup.function
@@ -643,9 +753,14 @@ class Simulator:
         self._signal_time += seconds
 
     def go_to_local(self) -> None:
+        """End Remote the way a bus-level go-to-local does: a lockout stays until something releases it (GTL alone does not)."""
         self._require_open()
         self.remote = False
-        self.front_panel_locked = False  # the front panel is in control again, Local key and all
+
+    def _local_command(self) -> None:
+        """`SYST:LOC`: Local, with the front panel's Local key working again."""
+        self.go_to_local()
+        self.front_panel_locked = False
 
     def close(self) -> None:
         self._closed = True
@@ -667,17 +782,5 @@ def _mnemonics(header: str) -> tuple[str, ...]:
     return tuple(parts[1:] if parts[0] == "SENS" and len(parts) > 1 else parts)
 
 
-def _number(word: str) -> float | None:
-    try:
-        value = float(word)
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _number_reply(value: float) -> str:
-    return f"{value + 0.0:+.8E}"
-
-
 def _overload(signal: float) -> float:
-    return math.copysign(_OVERLOAD_VALUE, signal)
+    return math.copysign(OVERLOAD_MAGNITUDE, signal)

@@ -12,9 +12,16 @@ from agilent34401a.errors import (
     MalformedReplyError,
     UnrecognisedIdentityError,
 )
-from agilent34401a.math_operations import MathOperation, MathSettings, MeterStatistics, limit_result_from_status
+from agilent34401a.math_operations import (
+    MathOperation,
+    MathSettings,
+    MeterStatistics,
+    limit_result_from_status,
+    limit_result_of,
+)
 from agilent34401a.meter import (
     NPLC_VALUES,
+    OVERLOAD_MAGNITUDE,
     AcFilter,
     Autozero,
     Function,
@@ -37,7 +44,10 @@ DISPLAY_TEXT_LIMIT = 12
 _ERROR_QUEUE_STATUS_BIT = 4  # bit 2 of the status byte: the error queue is not empty
 _EVENT_SUMMARY_STATUS_BIT = 32  # bit 5 of the status byte: with *ESE 1, operation complete
 _QUOTED = 2  # a quoted string is at least its two quotes
-_INFINITE_COUNT = 9.9e37  # how the Meter says infinite when asked for its Trigger Count
+STORE_LOCATIONS = range(1, 4)
+"""The Meter Memory locations a Setup can be stored in (location 0 is the Meter's own power-down state)."""
+RECALL_LOCATIONS = range(4)
+"""The Meter Memory locations a Setup can be recalled from."""
 _FETCH_BASE_TIMEOUT_S = 10.0
 _FETCH_TIMEOUT_PER_READING_S = 0.05  # 512 Readings of about 16 characters take several seconds at 9600 baud
 
@@ -176,7 +186,8 @@ class Driver:
 
         The Meter is first put back to one immediately triggered Reading if a Preset or a Burst left it otherwise,
         because `READ?` would wait for a bus trigger (and fail) or return several Readings. This is what Single and
-        Continuous use.
+        Continuous use. The Setup the driver remembers then has those trigger settings, so a caller that shows the Setup
+        (the Worker) must report that change: compare `setup.trigger` before and after.
 
         With a Limit Test running, the Meter's Questionable Data register says how the Reading did, which costs one more
         query. A Reading under Null, dB or dBm is the Operation's result, not the measured value.
@@ -235,6 +246,29 @@ class Driver:
         self._setup = Setup.default(function)  # a stand-in until read_setup, so Readings carry the right Function
         return self.drain_errors()
 
+    def save_to_meter(self, location: int) -> list[QueuedError]:
+        """Store the Meter's whole Setup in its own Meter Memory (`*SAV`), then drain the error queue (ADR-0005).
+
+        `location` is 1 to 3, anything else raises `ValueError` before anything is sent. This overwrites what was
+        there, so it is only ever done on the user's request (ADR-0004).
+        """
+        check_location(location, STORE_LOCATIONS)
+        self._transport.write(f"*SAV {location}")
+        return self.drain_errors()
+
+    def recall_from_meter(self, location: int) -> list[QueuedError]:
+        """Replace the Meter's Setup with the one in Meter Memory `location` (`*RCL`), then drain the error queue.
+
+        `location` is 0 (the power-down state) to 3, anything else raises `ValueError` before anything is sent. The
+        Setup the driver remembers is no longer right afterwards, so the caller must `read_setup` (ADR-0004: read it
+        back, never assume it).
+        """
+        check_location(location, RECALL_LOCATIONS)
+        self._transport.write(f"*RCL {location}")
+        errors = self.drain_errors()
+        self._setup = Setup.default(self._setup.function)  # a stand-in until read_setup, as after select_function
+        return errors
+
     def read_setup(self) -> Setup:
         """Ask the Meter what it is measuring, without changing anything (ADR-0004)."""
         answer = self._transport.query("FUNC?")
@@ -276,7 +310,7 @@ class Driver:
         triggers = self._read_number("TRIG:COUN?")
         try:
             return TriggerSettings(
-                source, delay, round(samples), None if triggers >= _INFINITE_COUNT else round(triggers)
+                source, delay, round(samples), None if triggers >= OVERLOAD_MAGNITUDE else round(triggers)
             )
         except InvalidSetupError as error:
             message = f"Meter reported trigger settings it does not have: {error}"
@@ -344,7 +378,12 @@ class Driver:
         burst.triggers_sent += 1
 
     def fetch_burst(self, burst: Burst) -> list[Reading]:
-        """Read the Burst's Readings out of Reading Memory (they stay there until the next Burst)."""
+        """Read the Burst's Readings out of Reading Memory (they stay there until the next Burst).
+
+        Under a Math Operation the Readings carry it, as those of `read` do. The Meter only says in its Questionable
+        Data register that some Reading failed a Limit Test, not which, so each Reading is judged against the bounds
+        the way the Meter does; the register is then read once to forget what the Burst latched in it.
+        """
         previous = self._transport.timeout
         self._transport.timeout = max(
             previous, _FETCH_BASE_TIMEOUT_S + _FETCH_TIMEOUT_PER_READING_S * burst.expected_readings
@@ -353,7 +392,22 @@ class Driver:
             reply = self._transport.query("FETC?")
         finally:
             self._transport.timeout = previous
-        return [parse_reading(word.strip(), burst.setup.function) for word in reply.split(",")]
+        readings = [parse_reading(word.strip(), burst.setup.function) for word in reply.split(",")]
+        operation = burst.setup.math.operation
+        if operation is None:
+            return readings
+        settings = burst.setup.math
+        if operation is MathOperation.LIMIT_TEST:
+            self._transport.query("STAT:QUES:EVEN?")
+            return [
+                replace(
+                    reading,
+                    math=operation,
+                    limit=limit_result_of(reading.value, settings.limit_lower, settings.limit_upper),
+                )
+                for reading in readings
+            ]
+        return [replace(reading, math=operation) for reading in readings]
 
     def finish_burst(self, burst: Burst) -> list[QueuedError]:
         """Put the trigger settings the Meter had before the Burst back, and return what its error queue held."""
@@ -643,6 +697,13 @@ class Driver:
             message = f"Meter replied {reply!r} to {query}, which is not a number"
             raise MalformedReplyError(message)
         return value
+
+
+def check_location(location: int, allowed: range) -> None:
+    """Raise `ValueError` unless `location` is one of the Meter Memory locations in `allowed`."""
+    if location not in allowed:
+        message = f"Meter Memory location is {allowed.start} to {allowed[-1]}, not {location}"
+        raise ValueError(message)
 
 
 def _unquote(reply: str) -> str:

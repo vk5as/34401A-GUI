@@ -132,6 +132,20 @@ def test_a_calibration_write_is_refused_and_never_sent_unless_the_override_is_ti
     pump(window, lambda: "CAL:STR 'x'" in simulator.commands)
 
 
+def test_the_calibration_override_covers_one_command_only(make_window):
+    simulator = RecordingSimulator()
+    window = make_window(simulator)
+    pump(window, lambda: connected(window))
+    window.console.allow_calibration.set(value=True)
+
+    send(window, "CAL:STR 'x'")
+
+    assert not window.console.allow_calibration.get()
+    send(window, "CAL:STR 'y'")
+    pump(window, shows(window.console, "Refused:"))
+    assert "CAL:STR 'y'" not in simulator.commands
+
+
 def test_a_read_only_calibration_query_needs_no_override(make_window):
     simulator = RecordingSimulator()
     window = make_window(simulator)
@@ -290,3 +304,16 @@ def test_ctrl_k_in_the_console_entry_does_not_eat_the_command_being_typed(make_w
 def _rows(window: MainWindow) -> list[tuple[str, ...]]:
     table = window.shortcuts_table
     return [tuple(str(value) for value in table.item(row, "values")) for row in table.get_children()]
+
+
+def test_an_error_from_a_raw_command_reaches_the_error_log_and_the_status_bar(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    window.notebook.select(window.system_tab)
+
+    send(window, "NOTACOMMAND")
+
+    log = window.system_tab.error_tree
+    pump(window, lambda: len(log.get_children()) == 1)
+    assert log.set(log.get_children()[0])["code"] in (-113, "-113")
+    pump(window, lambda: "-113" in str(window.status_error.cget("text")))

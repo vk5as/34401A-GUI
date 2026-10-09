@@ -4,6 +4,7 @@ import pytest
 
 from agilent34401a.driver import Driver
 from agilent34401a.errors import BurstRefusedError, BurstTooLargeError, MalformedReplyError
+from agilent34401a.math_operations import LimitResult, MathOperation, MathSettings
 from agilent34401a.meter import Function, Setup
 from agilent34401a.sim import Simulator
 from agilent34401a.trigger import TriggerSettings, TriggerSource
@@ -165,6 +166,46 @@ def test_an_immediate_burst_is_started_waited_for_and_fetched_from_reading_memor
     assert transport.commands[:4] == ["TRIG:SOUR IMM", "TRIG:DEL:AUTO ON", "SAMP:COUN 8", "TRIG:COUN 2"]
     assert "INIT" in transport.commands
     assert transport.commands.index("INIT") < transport.commands.index("*OPC?") < transport.commands.index("FETC?")
+
+
+def test_burst_readings_under_dbm_carry_the_operation_and_its_unit():
+    driver = Driver(Simulator(dc_voltage=1.0))
+    driver.apply(Setup.default(Function.DC_VOLTAGE).with_math(MathSettings(operation=MathOperation.DBM)))
+
+    burst = driver.start_burst(burst_of(3))
+    driver.wait_for_burst(burst)
+    readings = driver.fetch_burst(burst)
+
+    assert [reading.math for reading in readings] == [MathOperation.DBM] * 3
+    assert [reading.unit for reading in readings] == ["dBm"] * 3
+
+
+def test_burst_readings_under_a_limit_test_carry_how_each_did():
+    simulator = Simulator(dc_voltage=1.0)
+    driver = Driver(simulator)
+    limits = MathSettings(operation=MathOperation.LIMIT_TEST, limit_lower=-0.5, limit_upper=0.5)
+    driver.apply(Setup.default(Function.DC_VOLTAGE).with_math(limits))
+
+    burst = driver.start_burst(burst_of(2))
+    driver.wait_for_burst(burst)
+    readings = driver.fetch_burst(burst)
+
+    assert [reading.limit for reading in readings] == [LimitResult.HIGH] * 2
+    assert [reading.math for reading in readings] == [MathOperation.LIMIT_TEST] * 2
+
+
+def test_a_limit_test_failure_in_a_burst_is_not_blamed_on_the_next_reading():
+    simulator = Simulator(dc_voltage=1.0)
+    driver = Driver(simulator)
+    limits = MathSettings(operation=MathOperation.LIMIT_TEST, limit_lower=-0.5, limit_upper=0.5)
+    driver.apply(Setup.default(Function.DC_VOLTAGE).with_math(limits))
+    burst = driver.start_burst(burst_of(2))
+    driver.wait_for_burst(burst)
+    driver.fetch_burst(burst)
+    driver.finish_burst(burst)
+    simulator.set_signal(Function.DC_VOLTAGE, 0.1)
+
+    assert driver.read().limit is LimitResult.PASS
 
 
 def test_a_burst_leaves_the_meter_as_it_found_it_when_it_is_finished():

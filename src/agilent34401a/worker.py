@@ -2,7 +2,7 @@
 
 The GUI and CLI never call into the Transport or Driver themselves. They send the Worker requests
 (`connect`, `start_continuous`, `pause`, `single`, `start_burst`, `cancel_burst`, `apply_setup`, `disconnect`,
-`shutdown`) and learn what happened from the
+`save_to_meter`, `recall_from_meter`, `shutdown`) and learn what happened from the
 events it puts on the queue it was given, which Tk drains with `after()`.
 
 One Worker serves one Connection at a time but many in turn: `connect` opens one, `disconnect` (or a lost Connection)
@@ -21,7 +21,15 @@ from datetime import datetime, timedelta
 from functools import partial
 
 from agilent34401a.burst import Burst, plan_burst, reading_offsets
-from agilent34401a.driver import Driver, Identity, QueuedError, SystemInfo
+from agilent34401a.driver import (
+    RECALL_LOCATIONS,
+    STORE_LOCATIONS,
+    Driver,
+    Identity,
+    QueuedError,
+    SystemInfo,
+    check_location,
+)
 from agilent34401a.errors import (
     BurstRefusedError,
     BurstTooLargeError,
@@ -50,7 +58,8 @@ DEFAULT_BURST_POLL_INTERVAL_S = 0.05
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 
 
-def _local_now() -> datetime:
+def local_now() -> datetime:
+    """Return the wall-clock time now, with its UTC offset."""
     return datetime.now().astimezone()
 
 
@@ -83,7 +92,7 @@ class ReadingTaken:
     reading: Reading
     timestamp: float
     setup: Setup
-    taken_at: datetime = field(default_factory=_local_now)
+    taken_at: datetime = field(default_factory=local_now)
 
 
 @dataclass(frozen=True)
@@ -129,9 +138,15 @@ class BurstFailed:
 
 @dataclass(frozen=True)
 class SetupChanged:
-    """The Meter's Setup, read back after a change; it differs from the one asked for if the Meter refused part."""
+    """The Meter's Setup, read back after a change; it differs from the one asked for if the Meter refused part.
+
+    `requested` is the Setup an `apply_setup` request asked for when this is the answer to one, so that whoever sent it
+    can tell its answer from the other changes (a raw command's, a Reading that put the trigger settings back). It
+    takes no part in comparing events.
+    """
 
     setup: Setup
+    requested: Setup | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -175,6 +190,13 @@ class SelfTestFinished:
 
 
 @dataclass(frozen=True)
+class MeterMemoryStored:
+    """The Meter's Setup was stored in its own Meter Memory `location`, and the Meter queued no error about it."""
+
+    location: int
+
+
+@dataclass(frozen=True)
 class LockoutChanged:
     """The front panel's Local key was disabled (Lockout) or enabled again."""
 
@@ -190,9 +212,13 @@ class AdminFailed:
 
 @dataclass(frozen=True)
 class SetupFailed:
-    """A Setup change could not be completed or confirmed; the Connection was resynchronised."""
+    """A Setup change could not be completed or confirmed; the Connection was resynchronised.
+
+    `requested` is as for `SetupChanged`.
+    """
 
     message: str
+    requested: Setup | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -270,6 +296,7 @@ Event = (
     | ResetDone
     | SelfTestFinished
     | LockoutChanged
+    | MeterMemoryStored
     | AdminFailed
     | SetupFailed
     | ReadingFailed
@@ -336,6 +363,11 @@ class _Raw:
 
 
 @dataclass(frozen=True)
+class _Recall:
+    location: int
+
+
+@dataclass(frozen=True)
 class _System:
     """A request about the Meter itself rather than its Setup; `what` names it in a failure message."""
 
@@ -359,6 +391,7 @@ _Request = (
     | _Select
     | _System
     | _Raw
+    | _Recall
 )
 
 
@@ -381,7 +414,7 @@ class Worker:
         *,
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
-        wall_clock: Callable[[], datetime] = _local_now,
+        wall_clock: Callable[[], datetime] = local_now,
         burst_poll_interval_s: float = DEFAULT_BURST_POLL_INTERVAL_S,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
         reading_timeout: Callable[[Setup], float] = reading_timeout,
@@ -397,6 +430,7 @@ class Worker:
         self._timeout_for = reading_timeout
         self._sentinel: Sentinel | None = None
         self._failures = 0  # replies lost or garbled since the last good one
+        self._locked_out = False  # the application locked the front panel's Local key out and has not released it
         self._next_error_check = 0.0
         self._requests: queue.Queue[_Request] = queue.Queue()
         self._thread = threading.Thread(target=self._main, name="agilent34401a-worker", daemon=True)
@@ -508,6 +542,25 @@ class Worker:
         """Disable (Lockout) or enable the front panel's Local key."""
         self._requests.put(_System("Front panel lockout", partial(self._lockout, locked=locked)))
 
+    def save_to_meter(self, location: int) -> None:
+        """Store the Meter's Setup in its own Meter Memory `location` (1 to 3), overwriting what was there.
+
+        Only on the user's request (ADR-0004). The answer is a `MeterMemoryStored`, or an `ErrorsReported` if the Meter
+        complained. A location the Meter does not have raises `ValueError` here, before anything is sent.
+        """
+        check_location(location, STORE_LOCATIONS)
+        self._requests.put(_System("Storing the Setup in the Meter", partial(self._store_in_meter, location=location)))
+
+    def recall_from_meter(self, location: int) -> None:
+        """Replace the Meter's Setup with the one in its Meter Memory `location` (0, the power-down state, to 3).
+
+        Only on the user's request (ADR-0004). The answer is a `SetupChanged` with the Setup the Meter is really in
+        afterwards, then an `ErrorsReported` if it complained (a location that was never stored, say). A location the
+        Meter does not have raises `ValueError` here, before anything is sent.
+        """
+        check_location(location, RECALL_LOCATIONS)
+        self._requests.put(_Recall(location))
+
     def is_alive(self) -> bool:
         """Whether the Worker's thread is still running."""
         return self._thread.is_alive()
@@ -546,7 +599,10 @@ class Worker:
     def _connection(self, open_transport: Callable[[], Transport]) -> _Request | None:
         """Run one Connection from open to close; return the request that ended it, if one did and is not for it."""
         transport: Transport | None = None
+        driver: Driver | None = None
         ended_by: _Request | None = None
+        connection_lost = False
+        self._locked_out = False
         try:
             try:
                 transport = open_transport()
@@ -567,6 +623,7 @@ class Worker:
             try:
                 ended_by = self._serve(driver, transport)
             except TransportError as error:
+                connection_lost = True
                 _LOG.warning("The Connection was lost: %s", error)
                 self._events.put(ConnectionLost(str(error)))
         except Exception as error:  # noqa: BLE001 - the worker must never die silently; the UI reports it
@@ -574,9 +631,19 @@ class Worker:
             self._events.put(WorkerFailed(f"{type(error).__name__}: {error}"))
         finally:
             if transport is not None:
+                if self._locked_out and driver is not None and not connection_lost:
+                    self._unlock(driver)
                 self._release(transport)
             self._events.put(Disconnected())
         return None if isinstance(ended_by, _Disconnect) else ended_by
+
+    @staticmethod
+    def _unlock(driver: Driver) -> None:
+        """End a Lockout the application started: going to Local does not end it on GPIB, so it is done explicitly."""
+        try:
+            driver.unlock_front_panel()
+        except Exception:  # noqa: BLE001 - handing the Meter back matters more than why the unlock failed
+            _LOG.warning("Could not release the front panel's lockout", exc_info=True)
 
     @staticmethod
     def _release(transport: Transport) -> None:
@@ -618,21 +685,25 @@ class Worker:
                     continue
                 case _CancelBurst():
                     pass  # no Burst is being waited for
-                case _System() | _Apply() | _Select() | _Raw():
+                case _System() | _Apply() | _Select() | _Raw() | _Recall():
                     self._serve_command(driver, transport, request)
             if not running or (congested and request is None):
                 continue  # paused, or waiting for the consumer to catch up
             self._take_reading(driver, transport)
             self._check_errors_if_due(driver, transport)
 
-    def _serve_command(self, driver: Driver, transport: Transport, request: _System | _Apply | _Select | _Raw) -> None:
+    def _serve_command(
+        self, driver: Driver, transport: Transport, request: _System | _Apply | _Select | _Raw | _Recall
+    ) -> None:
         match request:
             case _System():
                 self._administer(driver, transport, request)
             case _Apply(setup):
-                self._change_setup(driver, transport, partial(driver.apply, setup))
+                self._change_setup(driver, transport, partial(driver.apply, setup), requested=setup)
             case _Select(function):
                 self._change_setup(driver, transport, partial(driver.select_function, function))
+            case _Recall(location):
+                self._change_setup(driver, transport, partial(driver.recall_from_meter, location))
             case _Raw(command, allow_calibration):
                 self._send_raw(driver, transport, command, allow_calibration=allow_calibration)
 
@@ -647,6 +718,7 @@ class Worker:
             return None
 
     def _take_reading(self, driver: Driver, transport: Transport) -> None:
+        trigger_before = driver.setup.trigger
         try:
             reading = driver.read()
         except (MalformedReplyError, TransportTimeoutError) as error:
@@ -655,6 +727,9 @@ class Worker:
             self._recover(transport, error)
             return
         self._failures = 0
+        if driver.setup.trigger != trigger_before:
+            # Single and Continuous need one immediately triggered Reading, so the Driver put the Meter back to that.
+            self._events.put(SetupChanged(driver.setup))
         self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup, self._wall_clock()))
         if reading.math is MathOperation.STATISTICS:
             self._report_statistics(driver, transport)
@@ -666,7 +741,7 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Lost the Statistics, resynchronising the Connection: %s", error)
             self._events.put(ReadingFailed(f"Statistics lost: {error}"))
-            transport.clear()
+            self._recover(transport, error)
             return
         self._events.put(StatisticsRead(statistics))
 
@@ -685,26 +760,31 @@ class Worker:
             return None
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not start a Burst, resynchronising the Connection: %s", error)
-            transport.clear()
             self._events.put(BurstFailed(f"The Burst could not be started: {error}"))
+            self._recover(transport, error)
             return None
         self._events.put(BurstStarted(trigger, burst.expected_readings, trigger.source is TriggerSource.EXTERNAL))
         started_at, wall_started_at = time.monotonic(), self._wall_clock()
         cancelled, ended, failure, readings = self._complete_burst(driver, burst)
-        if cancelled or failure is not None:
+        if cancelled:
             transport.clear()  # a device clear: the Meter stops waiting for triggers and returns to idle
+        elif failure is not None:
+            self._recover(transport, failure)  # the clear that stops the Meter waiting, then the sentinel
         errors = self._finish_burst(driver, transport, burst)
         if cancelled:
             self._events.put(BurstCancelled())
         elif failure is not None:
             self._events.put(BurstFailed(f"The Burst failed: {failure}"))
         else:
+            self._failures = 0
             self._report_burst(burst, readings, started_at, wall_started_at)
         if errors:
             self._events.put(ErrorsReported(tuple(errors)))
         return ended
 
-    def _complete_burst(self, driver: Driver, burst: Burst) -> tuple[bool, _Request | None, str | None, list[Reading]]:
+    def _complete_burst(
+        self, driver: Driver, burst: Burst
+    ) -> tuple[bool, _Request | None, MalformedReplyError | TransportTimeoutError | None, list[Reading]]:
         """Wait for the Burst and fetch it; return whether it was cancelled, by which request, why it failed, and what it took."""
         try:
             plan = plan_burst(burst.setup)
@@ -716,7 +796,7 @@ class Worker:
             return cancelled, ended, None, [] if cancelled else driver.fetch_burst(burst)
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("A Burst failed, resynchronising the Connection: %s", error)
-            return False, None, str(error), []
+            return False, None, error, []
 
     def _report_burst(
         self, burst: Burst, readings: list[Reading], started_at: float, wall_started_at: datetime
@@ -763,9 +843,9 @@ class Worker:
             errors = driver.finish_burst(burst)
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not restore the trigger settings after a Burst: %s", error)
-            transport.clear()
+            self._recover(transport, error)
             return []
-        transport.timeout = reading_timeout(driver.setup)
+        transport.timeout = self._timeout_for(driver.setup)
         return errors
 
     def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:
@@ -781,12 +861,19 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("A raw command failed, resynchronising the Connection: %s", error)
             self._recover(transport, error)
-            self._events.put(RawFailed(command, str(error), self._drain_after_failure(driver, transport)))
+            errors = self._drain_after_failure(driver, transport)
+            self._events.put(RawFailed(command, str(error), errors))
+            for event in _report(list(errors)):
+                self._events.put(event)
             return
         self._failures = 0
         self._events.put(RawReplied(command, result.reply, result.errors))
         if result.changes_meter:  # it may have changed the Setup behind the application's back
             self._change_setup(driver, transport, list)
+        # Every Meter error is reported as one (the error log and the status bar listen for that), after the Setup,
+        # which would otherwise clear the status bar again.
+        for event in _report(list(result.errors)):
+            self._events.put(event)
 
     def _drain_after_failure(self, driver: Driver, transport: Transport) -> tuple[QueuedError, ...]:
         """Empty the error queue of a Meter that did not answer, so its complaint is not blamed on a later command."""
@@ -813,7 +900,14 @@ class Worker:
         else:
             resynchronise(transport, self._sentinel)
 
-    def _change_setup(self, driver: Driver, transport: Transport, change: Callable[[], list[QueuedError]]) -> None:
+    def _change_setup(
+        self,
+        driver: Driver,
+        transport: Transport,
+        change: Callable[[], list[QueuedError]],
+        *,
+        requested: Setup | None = None,
+    ) -> None:
         """Make a change to the Meter's Setup, then report the Setup it ended up in and any errors it queued."""
         try:
             errors = change()
@@ -822,12 +916,12 @@ class Worker:
             terminals = driver.read_terminals()
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not change the Setup, resynchronising the Connection: %s", error)
-            self._events.put(SetupFailed(str(error)))
+            self._events.put(SetupFailed(str(error), requested))
             self._recover(transport, error)
             return
         self._failures = 0
         transport.timeout = self._timeout_for(actual)
-        self._events.put(SetupChanged(actual))
+        self._events.put(SetupChanged(actual, requested))
         if terminals is not before:
             self._events.put(TerminalsChanged(terminals))
         if errors:
@@ -883,13 +977,18 @@ class Worker:
         return [*_report(errors), StatisticsRead(driver.fetch_statistics())]
 
     @staticmethod
+    def _store_in_meter(driver: Driver, *, location: int) -> list[Event]:
+        errors = driver.save_to_meter(location)
+        return _report(errors) if errors else [MeterMemoryStored(location)]
+
+    @staticmethod
     def _self_test(driver: Driver) -> list[Event]:
         passed = driver.self_test()
         return [SelfTestFinished(passed=passed), *_report(driver.drain_errors())]
 
-    @staticmethod
-    def _lockout(driver: Driver, *, locked: bool) -> list[Event]:
+    def _lockout(self, driver: Driver, *, locked: bool) -> list[Event]:
         errors = driver.lock_front_panel() if locked else driver.unlock_front_panel()
+        self._locked_out = locked
         return [*_report(errors), LockoutChanged(locked=locked)]
 
 

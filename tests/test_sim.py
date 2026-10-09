@@ -686,14 +686,26 @@ def test_going_to_local_returns_the_simulator_to_local_without_touching_its_setu
     assert simulator.query("FUNC?") == '"RES"'
 
 
-def test_going_to_local_gives_the_front_panel_back_even_after_a_lockout():
+def test_going_to_local_does_not_end_a_lockout_that_somebody_else_must_release():
+    """On GPIB, GTL alone leaves the local lockout in force: only REN dropping (or SYST:LOC on RS-232) ends it."""
     simulator = Simulator()
     simulator.write("SYST:RWL")
     assert simulator.front_panel_locked
 
     simulator.go_to_local()
 
+    assert simulator.front_panel_locked
+    assert not _is_remote(simulator)
+
+
+def test_the_local_command_ends_a_lockout_and_goes_to_local():
+    simulator = Simulator()
+    simulator.write("SYST:RWL")
+
+    simulator.write("SYST:LOC")
+
     assert not simulator.front_panel_locked
+    assert not _is_remote(simulator)
 
 
 def test_going_to_local_on_a_closed_simulator_is_refused_like_any_command():

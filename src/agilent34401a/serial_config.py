@@ -162,6 +162,9 @@ class SerialSettings:
         if not isinstance(data["port"], str) or not isinstance(data["baud"], int):
             message = "The port is text and the baud rate a whole number"
             raise TypeError(message)
+        if not isinstance(data["framing"], str):
+            message = "The framing is text such as 8N1"
+            raise TypeError(message)
         return cls(
             port=data["port"],
             baud=data["baud"],

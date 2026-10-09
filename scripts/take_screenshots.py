@@ -148,9 +148,6 @@ def _start(session: _Session) -> None:
     session.simulators[0].time_scale = 0.0  # from here on a Reading takes no time, so 150 of them take seconds
     window.chart.clear()
     _take_readings(session, _HISTORY_READINGS)
-    # The Chart switches its own autoscaling off when matplotlib first draws it empty (see the report on issue #20),
-    # so it is asked to fit the Readings, as the Autoscale button does.
-    window.chart.fit_view()
 
 
 def _themes(session: _Session) -> None:

@@ -372,9 +372,9 @@ class MainWindow:
         """
         self.settings.compact_mode = compact
         self._compact_var.set(compact)
-        self.settings.save()
         self._layout()
         self.root.geometry("")  # let the window shrink or grow to fit what is shown
+        self._save_settings()
 
     def _layout(self) -> None:
         """Show the parts of the window that belong to the current mode, each in its usual place."""
@@ -396,11 +396,11 @@ class MainWindow:
         self.palette = apply_theme(self.root, theme)
         self.settings.theme = theme
         self._theme_var.set(theme.value)
-        self.settings.save()
         for menu in (*self._menus.values(), self._theme_menu, self.menubar):
             style_menu(menu, self.palette)
         for callback in self._theme_callbacks:
             callback(self.palette)
+        self._save_settings()
 
     def on_theme_changed(self, callback: Callable[[Palette], None]) -> None:
         """Call `callback` with the current Palette now and again whenever the theme changes.
@@ -689,6 +689,27 @@ class MainWindow:
             return False
         self._begin_change()
         self._worker.apply_setup(setup)
+        return True
+
+    def store_in_meter(self, location: int) -> bool:
+        """Ask the Worker to store the Meter's Setup in its Meter Memory `location` (1 to 3), overwriting what is there.
+
+        Returns False, having sent nothing, when there is no Connection or the Meter is busy with another change.
+        """
+        if self._setup is None or self._busy or self._ended or not self._connected:
+            return False
+        self._worker.save_to_meter(location)
+        return True
+
+    def recall_from_meter(self, location: int) -> bool:
+        """Ask the Worker to replace the Meter's Setup with the one in Meter Memory `location`, locking the controls.
+
+        Returns False, having sent nothing, when there is no Connection or the Meter is busy with another change.
+        """
+        if self._setup is None or self._busy or self._ended or not self._connected:
+            return False
+        self._begin_change()
+        self._worker.recall_from_meter(location)
         return True
 
     def _on_function(self, function: Function) -> None:

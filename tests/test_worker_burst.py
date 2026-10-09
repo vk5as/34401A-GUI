@@ -139,6 +139,7 @@ def test_single_after_a_burst_setup_was_left_on_the_meter_still_gives_one_readin
 
     worker.single()
 
+    assert isinstance(next_event(events), SetupChanged)  # the Meter was put back to one immediate Reading, and says so
     assert isinstance(next_event(events), ReadingTaken)
     assert simulator.query("TRIG:SOUR?") == "IMM"
 

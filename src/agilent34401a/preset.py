@@ -213,10 +213,22 @@ def _real(value: object, path: str, *, nullable: Literal[False] = False) -> floa
 def _real(value: object, path: str, *, nullable: bool = False) -> float | None:
     if value is None and nullable:
         return None
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+    number = _as_float(value)
+    if number is None:
         message = f"'{path}' must be a finite number{' or null' if nullable else ''}, not {value!r}"
         raise PresetError(message)
-    return value
+    return number
+
+
+def _as_float(value: object) -> float | None:
+    """`value` as a float if it is a finite number, else None; an integer too big for a float is not finite."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 @overload

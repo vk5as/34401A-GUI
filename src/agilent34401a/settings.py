@@ -42,7 +42,12 @@ class XAxis(Enum):
     """What the chart plots Readings against."""
 
     TIME = "time"
-    SAMPLE = "sample"
+    READING = "reading"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "XAxis | None":
+        """Accept the name settings files had before the Reading was called one: "sample"."""
+        return cls.READING if value == "sample" else None
 
 
 @dataclass(frozen=True)
@@ -212,6 +217,6 @@ def _read_connection(data: object) -> LastConnection | None:
             serial=SerialSettings.from_json(serial) if isinstance(serial, dict) else None,
         )
         simulate = data["simulate"]
-    except (KeyError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError, OverflowError):  # OverflowError: int(Infinity) from a hand-edited file
         return None
     return LastConnection(simulate=simulate, connection=connection) if isinstance(simulate, bool) else None

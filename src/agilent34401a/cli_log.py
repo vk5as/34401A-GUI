@@ -24,14 +24,10 @@ from agilent34401a.errors import MalformedReplyError, RepeatedFailureError, Tran
 from agilent34401a.meter import reading_timeout
 from agilent34401a.resync import Sentinel, resynchronise
 from agilent34401a.transport import Transport
-from agilent34401a.worker import DEFAULT_MAX_CONSECUTIVE_FAILURES
+from agilent34401a.worker import DEFAULT_MAX_CONSECUTIVE_FAILURES, local_now
 
 USAGE_ERROR = 2
 INTERRUPTED = 130  # 128 + SIGINT, the usual exit status of a program stopped with Ctrl+C
-
-
-def _local_now() -> datetime:
-    return datetime.now().astimezone()
 
 
 def log(  # noqa: PLR0913 - the clocks and streams are what tests replace
@@ -44,7 +40,7 @@ def log(  # noqa: PLR0913 - the clocks and streams are what tests replace
     prog: str,
     stdout: TextIO | None = None,
     clock: Callable[[], float] = time.monotonic,
-    wall_clock: Callable[[], datetime] = _local_now,
+    wall_clock: Callable[[], datetime] = local_now,
 ) -> int:
     """Take Readings until `count` of them are in or `duration_s` seconds have passed, whichever is first.
 

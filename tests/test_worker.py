@@ -9,6 +9,7 @@ from agilent34401a.driver import QueuedError
 from agilent34401a.errors import TransportError
 from agilent34401a.meter import Function, Resolution, Setup, reading_timeout
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
+from agilent34401a.trigger import TriggerSettings, TriggerSource
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
@@ -412,7 +413,7 @@ def test_shutdown_before_start_does_not_poison_a_later_start():
     assert worker.shutdown() is True
 
 
-def test_a_device_that_is_not_a_34401a_fails_the_connection_and_is_closed(started):
+def test_something_that_is_not_a_34401a_fails_the_connection_and_is_closed(started):
     simulator = HookedSimulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01")
     _worker, events = started(simulator)
 
@@ -769,6 +770,8 @@ def test_a_raw_write_the_meter_complains_about_reports_its_errors(started):
     replied = next_event(events)
     assert isinstance(replied, RawReplied)
     assert [queued.code for queued in replied.errors] == [-113]
+    # Every Meter error is also reported as such, which is what the error log and the status bar listen to.
+    assert collect_until(events, lambda event: isinstance(event, ErrorsReported))[-1] == ErrorsReported(replied.errors)
 
 
 def test_raw_commands_are_served_between_readings_while_continuous_runs(started):
@@ -798,6 +801,7 @@ def test_a_raw_query_that_times_out_is_reported_and_the_worker_carries_on(starte
     assert isinstance(failed, RawFailed)
     assert failed.command == "NOTAQUERY?"
     assert [queued.code for queued in failed.errors] == [-113]
+    assert next_event(events) == ErrorsReported(failed.errors)
     assert simulator.clears == 1
     worker.send_raw("*IDN?")
     assert isinstance(next_event(events), RawReplied)
@@ -856,3 +860,36 @@ def test_an_empty_raw_command_is_reported_not_sent(started):
     assert isinstance(failed, RawFailed)
     assert "Nothing to send" in failed.message
     assert len(simulator.writes) == written
+
+
+def test_a_fixed_trigger_delay_is_part_of_what_a_reading_may_take_so_readings_do_not_time_out(started):
+    simulator = HookedSimulator(time_scale=1, sleep=lambda _seconds: None)
+    worker, events = started(simulator)
+    next_event(events)
+    delayed = Setup.default(Function.DC_VOLTAGE).with_trigger(TriggerSettings(delay=4.0))
+
+    worker.apply_setup(delayed)
+    worker.start_continuous()
+
+    assert next_event(events) == SetupChanged(delayed)
+    assert simulator.timeout > 4.0
+    assert isinstance(next_event(events), ReadingTaken)
+
+
+def test_a_reading_that_puts_the_trigger_settings_back_to_one_immediate_reading_says_so(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    several = Setup.default(Function.DC_VOLTAGE).with_trigger(TriggerSettings(TriggerSource.BUS, sample_count=10))
+    worker.apply_setup(several)
+    assert next_event(events) == SetupChanged(several)
+
+    worker.single()
+
+    changed = next_event(events)
+    assert isinstance(changed, SetupChanged)
+    assert changed.setup.trigger == TriggerSettings()
+    reading = next_reading(events)
+    assert reading.setup.trigger == TriggerSettings()
+    worker.single()
+    assert next_reading(events).reading.function is Function.DC_VOLTAGE  # nothing more to report the second time

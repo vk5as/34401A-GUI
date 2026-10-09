@@ -230,7 +230,7 @@ def test_probe_closes_every_port_it_opens_and_leaves_the_meter_in_local():
     assert not simulated.simulator.remote
 
 
-def test_a_device_that_is_not_a_34401a_is_not_a_found_meter():
+def test_something_that_is_not_a_34401a_is_not_a_found_meter():
     simulated = SimulatedSerialMeter(Simulator(identity="ACME,Widget,1,2"), baud=9600)
 
     result = run_probe(simulated.open, BASE)

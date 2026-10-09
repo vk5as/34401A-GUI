@@ -35,6 +35,22 @@ def test_the_connection_options_are_the_same_as_the_clis():
     )
 
 
+def test_a_serial_port_and_its_options_connect_over_rs_232():
+    chosen = startup(["--serial-port", "/dev/ttyUSB0", "--baud", "4800", "--parity", "even", "--data-bits", "7"])
+
+    assert chosen is not None
+    assert not chosen.simulate
+    serial = chosen.connection.serial
+    assert serial is not None
+    assert (serial.port, serial.baud) == ("/dev/ttyUSB0", 4800)
+    assert (serial.framing.data_bits, serial.framing.parity.value) == (7, "even")
+
+
+def test_serial_options_without_a_port_are_an_error_not_ignored():
+    with pytest.raises(SystemExit):
+        startup(["--baud", "4800"])
+
+
 def test_a_raw_resource_string_can_be_given_on_the_command_line():
     chosen = startup(["--backend", "ivi", "--resource", "TCPIP::127.0.0.1::5025::SOCKET"])
 

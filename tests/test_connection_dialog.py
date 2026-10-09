@@ -1,3 +1,4 @@
+import gc
 import threading
 import time
 import tkinter as tk
@@ -469,3 +470,79 @@ def test_closing_the_dialog_while_a_scan_is_running_is_harmless(open_dialog, tk_
     deadline = time.monotonic() + 0.2
     pump(tk_root, lambda: time.monotonic() > deadline)
     assert chosen.calls == []
+
+
+def _join_lookups() -> None:
+    for thread in threading.enumerate():
+        if thread.name == "agilent34401a-lookup":
+            thread.join(TIMEOUT_S)
+
+
+def test_closing_the_dialog_while_a_lookup_runs_does_not_leave_the_helper_thread_to_free_it(tk_root):
+    """ADR-0008: the dialog holds Tk variables, which may only be finalised on the Tk thread."""
+    parent = tk.Toplevel(tk_root)
+    parent.update()
+    started, release = threading.Event(), threading.Event()
+    finalised_on: list[threading.Thread] = []
+
+    def slow_detect() -> Mapping[Backend, BackendStatus]:
+        started.set()
+        release.wait(TIMEOUT_S)
+        return default_detect()
+
+    class Spy(ConnectionDialog):
+        def __del__(self) -> None:
+            finalised_on.append(threading.current_thread())
+
+    try:
+        dialog = Spy(parent, detect=slow_detect, scan=default_scan, on_connect=Chosen())
+        assert started.wait(TIMEOUT_S)
+        dialog.close()
+        del dialog  # the test no longer holds it, as the window does not after closing it
+        gc.collect()
+
+        release.set()
+        _join_lookups()
+        gc.collect()
+
+        assert finalised_on, "the dialog was never freed"
+        assert finalised_on == [threading.current_thread()]
+    finally:
+        release.set()
+        _join_lookups()
+        parent.destroy()
+
+
+def test_closing_the_dialog_while_a_scan_runs_does_not_leave_the_helper_thread_to_free_it(tk_root):
+    parent = tk.Toplevel(tk_root)
+    parent.update()
+    started, release = threading.Event(), threading.Event()
+    finalised_on: list[threading.Thread] = []
+
+    def slow_scan(_requested: Backend) -> Mapping[Backend, BackendScan]:
+        started.set()
+        release.wait(TIMEOUT_S)
+        return default_scan(_requested)
+
+    class Spy(ConnectionDialog):
+        def __del__(self) -> None:
+            finalised_on.append(threading.current_thread())
+
+    try:
+        held = [Spy(parent, detect=default_detect, scan=slow_scan, on_connect=Chosen())]
+        pump(tk_root, lambda: held[0].detected)
+        held[0].scan_button.invoke()
+        assert started.wait(TIMEOUT_S)
+        held[0].close()
+        held.clear()
+        gc.collect()
+
+        release.set()
+        _join_lookups()
+        gc.collect()
+
+        assert finalised_on == [threading.current_thread()]
+    finally:
+        release.set()
+        _join_lookups()
+        parent.destroy()

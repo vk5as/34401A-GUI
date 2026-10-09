@@ -155,13 +155,13 @@ Export Burst as CSV…), View (Clear History, Compact mode, Theme) and Help (Sho
 
 | Tab | What it does |
 |---|---|
-| **Chart** | A live plot of the History (the most recent 10 000 Readings unless you set another length) against time or sample number. Pan, zoom, Autoscale, Clear History, Break Markers where the Function or unit changed, and a strip of N, Mean, Std dev, Min, Max, Pk-Pk and the count of overloads, calculated from the History. Export to PNG or SVG from the File menu. |
+| **Chart** | A live plot of the History (the most recent 10 000 Readings unless you set another length) against time or Reading number. Pan, zoom, Autoscale, Clear History, Break Markers where the Function or unit changed, and a strip of N, Mean, Std dev, Min, Max, Pk-Pk and the count of overloads, calculated from the History. Export to PNG or SVG from the File menu. |
 | **Sense** | AC Filter (3, 20 or 200 Hz), Gate Time, Autozero (on, off or once) and Input Impedance, each enabled only for the Functions it applies to. |
 | **Trigger** | Trigger Source, Trigger Delay, Sample Count and Trigger Count, and Start Burst. See [Single and Burst](#single-and-burst). |
 | **Math** | Null, dB, dBm, the Meter's Statistics and a Limit Test. See [Math](#math). |
-| **Presets** | Named Setups to save, apply, rename, delete, export and import. See [Presets](#presets). |
+| **Presets** | Named Setups to save, apply, rename, delete, export and import; and below them the Meter's own **Meter Memory**, to store and recall its numbered Setups. See [Presets](#presets). |
 | **System** | Identity, firmware and SCPI version; Reset… (asks first) and Self-test; the front-panel Lockout; the beeper (with a test beep) and display (on or off, and a message of up to 12 characters); the calibration count and message, **read-only**; and the log of Meter errors with their time, code and message. |
-| **SCPI console** | A raw SCPI command or query and the Meter's reply, with Up/Down to recall earlier commands. Calibration writes are refused unless the override is ticked ([ADR-0006](docs/adr/0006-calibration-writes-are-blocked.md)). |
+| **SCPI console** | A raw SCPI command or query and the Meter's reply, with Up/Down to recall earlier commands. Calibration writes are refused unless the override is ticked, which covers the next command only ([ADR-0006](docs/adr/0006-calibration-writes-are-blocked.md)). |
 
 The Chart is the image at the top: 150 Readings of the Simulator's wandering DC voltage. The other tabs:
 
@@ -252,7 +252,14 @@ agilent34401a-cli idn --simulate        # print the Meter's identity and firmwar
 agilent34401a-cli errors --simulate     # print and clear the Meter's error queue
 agilent34401a-cli selftest --simulate   # run the self-test (about 10 s on a real Meter); 1 if it fails
 agilent34401a-cli reset --simulate      # *RST: the only command that resets the Meter
+agilent34401a-cli save 2 --simulate     # *SAV 2: store the Meter's Setup in its own Meter Memory location 2 (1 to 3)
+agilent34401a-cli recall 2 --simulate   # *RCL 2: put that Setup back (0 to 3), then print what the Meter is now in
 ```
+
+`save` and `recall` use the Meter's own numbered, unnamed [Meter Memory](#presets) and, like `reset`, change the Meter only
+because you asked. `recall` reads the Setup back and prints it; recalling a location that was never stored fails with the
+Meter's error and exit code 1. (With `--simulate` each command starts a new Simulator, so use the
+[Simulator server](#simulator) to see a store survive until the recall.)
 
 `raw` sends one raw SCPI command or query and prints the reply, like the SCPI console tab (Ctrl+K). Commands that
 would change the Meter's calibration (`CAL:SEC`, `CAL:VAL`, `CAL`, `CAL:STR` writes) are refused with exit code 2
@@ -303,7 +310,8 @@ agilent34401a-cli read --serial-port /dev/ttyUSB0 --baud 4800 --data-bits 7 --pa
 The options are `--baud` (300 to 9600), `--data-bits` (7 or 8), `--parity` (none, even, odd), `--stop-bits` (1 or 2),
 `--flow-control` (none, xonxoff, rtscts, dtrdsr), `--terminator` (lf, cr, crlf), and `--dtr`/`--rts` (on or off)
 to hold those lines for an unusual cable. The Meter is put in Remote with `SYST:REM` when the Connection opens and
-returned to Local with `SYST:LOC` when it closes. Lockout over RS-232 is `SYST:RWL`.
+returned to Local with `SYST:LOC` when it closes. Lockout over RS-232 is `SYST:RWL`; over GPIB it is the bus's own
+Local Lockout message, which the application releases before it disconnects.
 
 If you do not know the Meter's settings, use Probe: the Probe button in the dialog (with a progress bar and
 Cancel), or the `probe` subcommand, which prints the options that work and exits with 0 when it found a Meter:
@@ -320,7 +328,7 @@ itself, so disconnect first. When nothing answers it says what to check:
 
 - the cable must be a null-modem (crossed) cable, not a straight-through one;
 - the Meter's I/O menu must be set to RS-232 rather than GPIB, and its baud rate and parity set under that menu;
-- the Flow Control must match the Meter's handshake, which is why Probe can include it.
+- the Flow Control must match the Meter's own Flow Control setting, which is why Probe can include it.
 
 Linux caveat: pyserial does not implement DTR/DSR Flow Control in hardware on Linux; it only asserts DTR, and
 never waits for DSR. Windows implements it. On Linux, DTR/DSR therefore behaves like no Flow Control with DTR held
@@ -354,6 +362,8 @@ Setup).
 - A Connection that cannot send a device clear (a raw TCP socket, such as the `agilent34401a-sim` server) cannot
   cancel a wait for an external trigger, so the External source is disabled there, with a tooltip saying why.
 - The Meter's trigger settings are put back when the Burst ends, so Run and Single keep working.
+- Run and Single need one immediately triggered Reading. If the Meter is left on a bus or external trigger, or on
+  several Readings, they put it back to that (the Trigger Delay stays) and the Trigger tab shows the change.
 
 ## Math
 
@@ -364,13 +374,32 @@ the Limit Test. The Meter turns the Operation off when the Function changes.
 
 ## Presets
 
-The Meter's own memory (`*SAV` and `*RCL`) holds only a few unnamed Setups and can be used only through the remote interface, so the Presets tab keeps named Setups in the application. Save current
+The Meter's own memory (`*SAV` and `*RCL`) holds only a few unnamed Setups, so the Presets tab keeps named Setups in the application. Save current
 Setup stores what the Meter last reported under the name you type. Apply sends a Preset to the Meter (Function first,
 then Range and Resolution, the sense options, the trigger and the Math Operation) and then says which settings the Meter
 did **not** take, so that a Preset never half-applies without you knowing; the Meter's own error messages follow. Rename…,
 Delete, Export… (one Preset), Export all… and Import… (a file, asking whether to replace or keep both when a name is
 already used) complete the tab. Presets live in `presets.json` beside the settings and travel between bench PCs as
 exported `.json` files. A Preset holds the Setup the Meter reported, so it never holds Autozero Once.
+
+### Meter Memory
+
+Below the Presets, a separate **Meter Memory** section uses the Meter's own memory: four numbered locations that hold a
+whole Setup (the Function, each Function's Range and Integration Time, the sense options, the trigger settings and the
+Math). Unlike Presets they have no names, stay in the Meter rather than on this computer, cannot be exported, and can
+be written and read only through the remote interface (the front panel cannot store or recall). Choose a location, then:
+
+- **Store on Meter** writes the Meter's current Setup to location 1, 2 or 3 (`*SAV`), after asking, because it
+  overwrites what was there.
+- **Recall from Meter** replaces the Setup the Meter is using with the one in that location (`*RCL`), after asking,
+  and the window then shows the Setup the Meter is really in. Location 0 is the Meter's power-down state: it can be
+  recalled but not stored to. A location that was never stored is the Meter's error, shown instead of success.
+
+Nothing is ever stored or recalled by itself: not when connecting, changing the Setup or disconnecting (see
+[ADR-0004](docs/adr/0004-read-back-setup-on-connect.md)). The buttons are disabled without a Connection and while the
+Meter is busy with another change. A recalled Setup that uses a bus or external trigger is put back to one immediate
+Reading by the next Run or Single, as for a Preset. On the command line, use `save` and `recall` (see
+[Command line](#command-line)).
 
 ## Simulator
 
@@ -389,7 +418,8 @@ agilent34401a-sim --port 5025 &
 agilent34401a-gui --backend py --resource "TCPIP::127.0.0.1::5025::SOCKET"
 ```
 
-Its options are `--host` (default 127.0.0.1), `--port` (default 5025; 0 picks any free one), `--identity` (`hp` or
+Its options are `--host` (default 127.0.0.1; anything else prints a warning, because the server has no authentication and
+starts a thread for every connection, so only listen beyond this machine on a network you trust), `--port` (default 5025; 0 picks any free one), `--identity` (`hp` or
 `agilent`, which firmware to pretend to be), `--time-scale` (1 is real time, 0 is instant) and `--fault`. The
 `AGILENT34401A_SIM_TIME_SCALE` environment variable sets the time scale of the in-process Simulator in the same way.
 
@@ -459,7 +489,7 @@ push or a tag. To release:
 2. Run the Release workflow on `main`. It refuses to start if the tag `v<version>` already exists.
 3. It runs the static analysis and tests (Linux and Windows), builds the wheel and sdist, runs `twine check` and
    `check-wheel-contents`, then installs the built wheel into a clean virtual environment on Windows with Python
-   3.11, 3.12, 3.13 and 3.14. There it constructs the GUI against the Simulator and runs `--help` for
+   3.10, 3.11, 3.12, 3.13 and 3.14. There it constructs the GUI against the Simulator and runs `--help` for
    `agilent34401a-cli` and `agilent34401a-sim`.
 4. Only if every one of those passed does it create the release `v<version>`, with the wheel and sdist attached and
    generated release notes. Run from any other branch, it executes the gates as a dry run and creates nothing.

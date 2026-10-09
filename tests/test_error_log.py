@@ -1,18 +1,18 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
 from agilent34401a.driver import QueuedError
 from agilent34401a.error_log import ErrorLog, LoggedError
 
-NOON = datetime(2026, 10, 8, 12, 0, 0, tzinfo=UTC)
+NOON = datetime(2026, 10, 8, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_the_log_keeps_every_error_with_the_time_it_was_reported_oldest_first():
     log = ErrorLog()
 
     log.add([QueuedError(-113, "Undefined header"), QueuedError(-222, "Data out of range")], NOON)
-    log.add([QueuedError(-109, "Missing parameter")], datetime(2026, 10, 8, 12, 0, 5, tzinfo=UTC))
+    log.add([QueuedError(-109, "Missing parameter")], datetime(2026, 10, 8, 12, 0, 5, tzinfo=timezone.utc))
 
     assert [(entry.timestamp.second, entry.code) for entry in log.entries] == [(0, -113), (0, -222), (5, -109)]
     assert len(log) == 3

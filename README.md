@@ -183,7 +183,8 @@ The **View** menu has:
 
 - **Theme**: Light, Dark or System. Light and Dark are built on ttk's `clam` theme, which renders the same on
   Windows and Linux. System uses the platform's native ttk theme as it is. The choice is remembered.
-- **Compact mode**: only the readout, the Function buttons and the Range are left, and the window shrinks to fit. Also
+- **Compact mode**: only the readout, the Function buttons, Run/Pause and the Range, Resolution and Integration Time
+  controls are left (the setup line, Raw Reading and the tabs are hidden), and the window shrinks to fit. Also
   remembered.
 
 | Light | Dark |
@@ -192,7 +193,7 @@ The **View** menu has:
 
 | System | Compact mode |
 |---|---|
-| ![System theme, the platform's native ttk look](docs/images/theme_system.png) | ![Compact mode, only the readout, Function buttons and Range](docs/images/compact_mode.png) |
+| ![System theme, the platform's native ttk look](docs/images/theme_system.png) | ![Compact mode, the readout, Function buttons, Run/Pause and the Range, Resolution and Integration Time controls](docs/images/compact_mode.png) |
 
 ### Keyboard shortcuts
 

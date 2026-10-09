@@ -246,10 +246,10 @@ class MainWindow:
         self._controls = controls
         self._control_items: list[tuple[tk.Widget, dict[str, Any], bool]] = []  # widget, pack options, in compact mode
         self.run_button = ttk.Button(controls, text="Run", command=self._toggle_run, state="disabled")
-        self._add_control(self.run_button, {"side": "left", "padx": (0, 12)}, compact=False)
+        self._add_control(self.run_button, {"side": "left", "padx": (0, 12)}, compact=True)
         self.range_box = self._combobox(controls, "Range", self._on_range, compact=True)
-        self.resolution_box = self._combobox(controls, "Resolution", self._on_resolution, compact=False)
-        self.nplc_box = self._combobox(controls, "Integration Time", self._on_nplc, compact=False)
+        self.resolution_box = self._combobox(controls, "Resolution", self._on_resolution, compact=True)
+        self.nplc_box = self._combobox(controls, "Integration Time", self._on_nplc, compact=True)
         self._raw = tk.BooleanVar(value=False)
         self.raw_check = ttk.Checkbutton(controls, text="Raw Reading", variable=self._raw, command=self._render_readout)
         self._add_control(self.raw_check, {"side": "left", "padx": (12, 0)}, compact=False)
@@ -365,7 +365,11 @@ class MainWindow:
         self.menu("View").add_cascade(label="Theme", menu=themes)
 
     def set_compact(self, *, compact: bool) -> None:
-        """Show only the readout, Function buttons and Range (or everything again), and remember the choice."""
+        """Show only the readout, Function buttons, Run/Pause and the Range, Resolution and Integration Time controls.
+
+        Everything else (the setup line, Raw Reading, the tabs) comes back when `compact` is False. The choice is
+        remembered.
+        """
         self.settings.compact_mode = compact
         self._compact_var.set(compact)
         self.settings.save()

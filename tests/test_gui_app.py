@@ -1011,21 +1011,30 @@ def test_asking_for_the_shortcuts_twice_shows_one_window(make_window):
 
 
 def _shown(*widgets: tk.Misc) -> list[bool]:
-    return [bool(widget.winfo_ismapped()) for widget in widgets]
+    """Whether each widget is placed in the window (asking the layout, not whether the OS has mapped it yet)."""
+    return [bool(widget.winfo_manager()) for widget in widgets]
 
 
 def _compact_toggle(window: MainWindow) -> None:
     _choose_in_menu(window.menu("View"), "Compact mode")
 
 
-def test_compact_mode_keeps_only_the_readout_the_function_buttons_and_the_range(tk_root):
+def test_compact_mode_keeps_the_readout_the_function_buttons_run_and_the_three_settings_controls(tk_root):
     window = _window_with(tk_root, _settings_with(compact_mode=True))
     try:
         window.add_tab("Extra", ttk.Frame(window.notebook))
         window.root.update()
 
-        kept = [window.readout, window.function_label, window.function_buttons[Function.DC_VOLTAGE], window.range_box]
-        dropped = [window.setup_label, window.run_button, window.resolution_box, window.nplc_box, window.raw_check]
+        kept = [
+            window.readout,
+            window.function_label,
+            window.function_buttons[Function.DC_VOLTAGE],
+            window.run_button,
+            window.range_box,
+            window.resolution_box,
+            window.nplc_box,
+        ]
+        dropped = [window.setup_label, window.raw_check]
         assert all(_shown(*kept))
         assert not any(_shown(*dropped))
         assert not any(_shown(window.notebook))
@@ -1043,16 +1052,15 @@ def test_the_view_menu_switches_compact_mode_on_and_off_and_saves_it(tk_root, tm
 
         assert settings.compact_mode is True
         assert Settings.load(tmp_path).compact_mode is True
-        assert not window.run_button.winfo_ismapped()
+        assert not any(_shown(window.setup_label, window.raw_check, window.notebook))
 
         _compact_toggle(window)
         window.root.update()
 
         assert Settings.load(tmp_path).compact_mode is False
-        assert window.run_button.winfo_ismapped()
-        assert window.setup_label.winfo_ismapped()
-        assert window.resolution_box.winfo_ismapped()
-        assert window.notebook.winfo_ismapped()
+        assert all(
+            _shown(window.run_button, window.setup_label, window.resolution_box, window.raw_check, window.notebook)
+        )
     finally:
         window.close()
 

@@ -12,7 +12,13 @@ from agilent34401a.errors import (
     MalformedReplyError,
     UnrecognisedIdentityError,
 )
-from agilent34401a.math_operations import MathOperation, MathSettings, MeterStatistics, limit_result_from_status
+from agilent34401a.math_operations import (
+    MathOperation,
+    MathSettings,
+    MeterStatistics,
+    limit_result_from_status,
+    limit_result_of,
+)
 from agilent34401a.meter import (
     NPLC_VALUES,
     AcFilter,
@@ -345,7 +351,12 @@ class Driver:
         burst.triggers_sent += 1
 
     def fetch_burst(self, burst: Burst) -> list[Reading]:
-        """Read the Burst's Readings out of Reading Memory (they stay there until the next Burst)."""
+        """Read the Burst's Readings out of Reading Memory (they stay there until the next Burst).
+
+        Under a Math Operation the Readings carry it, as those of `read` do. The Meter only says in its Questionable
+        Data register that some Reading failed a Limit Test, not which, so each Reading is judged against the bounds
+        the way the Meter does; the register is then read once to forget what the Burst latched in it.
+        """
         previous = self._transport.timeout
         self._transport.timeout = max(
             previous, _FETCH_BASE_TIMEOUT_S + _FETCH_TIMEOUT_PER_READING_S * burst.expected_readings
@@ -354,7 +365,22 @@ class Driver:
             reply = self._transport.query("FETC?")
         finally:
             self._transport.timeout = previous
-        return [parse_reading(word.strip(), burst.setup.function) for word in reply.split(",")]
+        readings = [parse_reading(word.strip(), burst.setup.function) for word in reply.split(",")]
+        operation = burst.setup.math.operation
+        if operation is None:
+            return readings
+        settings = burst.setup.math
+        if operation is MathOperation.LIMIT_TEST:
+            self._transport.query("STAT:QUES:EVEN?")
+            return [
+                replace(
+                    reading,
+                    math=operation,
+                    limit=limit_result_of(reading.value, settings.limit_lower, settings.limit_upper),
+                )
+                for reading in readings
+            ]
+        return [replace(reading, math=operation) for reading in readings]
 
     def finish_burst(self, burst: Burst) -> list[QueuedError]:
         """Put the trigger settings the Meter had before the Burst back, and return what its error queue held."""

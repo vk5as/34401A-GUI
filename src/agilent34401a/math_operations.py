@@ -94,6 +94,13 @@ def limit_result_from_status(questionable_events: int) -> LimitResult:
     return LimitResult.PASS
 
 
+def limit_result_of(value: float, lower: float, upper: float) -> LimitResult:
+    """How `value` does in a Limit Test between `lower` and `upper`, as the Meter judges it: above is HI, below is LO."""
+    if value > upper:
+        return LimitResult.HIGH
+    return LimitResult.LOW if value < lower else LimitResult.PASS
+
+
 def offset_that_nulls(value: float, *, nulled_by: float | None) -> float:
     """Return the Null offset that makes a Reading of `value` read zero.
 

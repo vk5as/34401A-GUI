@@ -58,7 +58,8 @@ DEFAULT_BURST_POLL_INTERVAL_S = 0.05
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 
 
-def _local_now() -> datetime:
+def local_now() -> datetime:
+    """Return the wall-clock time now, with its UTC offset."""
     return datetime.now().astimezone()
 
 
@@ -91,7 +92,7 @@ class ReadingTaken:
     reading: Reading
     timestamp: float
     setup: Setup
-    taken_at: datetime = field(default_factory=_local_now)
+    taken_at: datetime = field(default_factory=local_now)
 
 
 @dataclass(frozen=True)
@@ -413,7 +414,7 @@ class Worker:
         *,
         error_check_interval_s: float = DEFAULT_ERROR_CHECK_INTERVAL_S,
         clock: Callable[[], float] = time.monotonic,
-        wall_clock: Callable[[], datetime] = _local_now,
+        wall_clock: Callable[[], datetime] = local_now,
         burst_poll_interval_s: float = DEFAULT_BURST_POLL_INTERVAL_S,
         max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
         reading_timeout: Callable[[Setup], float] = reading_timeout,

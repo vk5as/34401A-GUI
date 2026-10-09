@@ -21,6 +21,7 @@ from agilent34401a.math_operations import (
 )
 from agilent34401a.meter import (
     NPLC_VALUES,
+    OVERLOAD_MAGNITUDE,
     AcFilter,
     Autozero,
     Function,
@@ -43,7 +44,6 @@ DISPLAY_TEXT_LIMIT = 12
 _ERROR_QUEUE_STATUS_BIT = 4  # bit 2 of the status byte: the error queue is not empty
 _EVENT_SUMMARY_STATUS_BIT = 32  # bit 5 of the status byte: with *ESE 1, operation complete
 _QUOTED = 2  # a quoted string is at least its two quotes
-_INFINITE_COUNT = 9.9e37  # how the Meter says infinite when asked for its Trigger Count
 STORE_LOCATIONS = range(1, 4)
 """The Meter Memory locations a Setup can be stored in (location 0 is the Meter's own power-down state)."""
 RECALL_LOCATIONS = range(4)
@@ -310,7 +310,7 @@ class Driver:
         triggers = self._read_number("TRIG:COUN?")
         try:
             return TriggerSettings(
-                source, delay, round(samples), None if triggers >= _INFINITE_COUNT else round(triggers)
+                source, delay, round(samples), None if triggers >= OVERLOAD_MAGNITUDE else round(triggers)
             )
         except InvalidSetupError as error:
             message = f"Meter reported trigger settings it does not have: {error}"

@@ -14,6 +14,7 @@ from agilent34401a.applied_signal import AppliedSignal
 from agilent34401a.errors import TransportError, TransportTimeoutError
 from agilent34401a.meter import (
     NPLC_VALUES,
+    OVERLOAD_MAGNITUDE,
     AcFilter,
     Autozero,
     Function,
@@ -23,6 +24,7 @@ from agilent34401a.meter import (
     Terminals,
     measurement_time,
 )
+from agilent34401a.sim_common import number_reply, parse_number
 from agilent34401a.sim_math import MathUnit
 from agilent34401a.sim_trigger import SimHost, TriggerModel
 from agilent34401a.trigger import TriggerSettings
@@ -33,7 +35,6 @@ AGILENT_IDENTITY = "Agilent Technologies,34401A,MY45000001,11-5-2"
 TIME_SCALE_ENV_VAR = "AGILENT34401A_SIM_TIME_SCALE"
 """Overrides the default time scale: 1 is real time, 0 is instant."""
 
-_OVERLOAD_VALUE = 9.9e37
 _OVER_RANGE = 1.2  # most ranges read up to 120 % of their full scale
 # These ranges cannot be exceeded: the 1000 V and 750 V limits are safety limits, and 3 A is the fuse.
 _NO_OVER_RANGE = frozenset(
@@ -402,7 +403,7 @@ class Simulator:
         if not argument:
             self._errors.append(_MISSING_PARAMETER)
             return
-        number = _number(argument)
+        number = parse_number(argument)
         if number is None:
             self._errors.append(_ILLEGAL_PARAMETER)
             return
@@ -564,7 +565,7 @@ class Simulator:
     def _choose(self, word: str, choices: Sequence[float]) -> float | None:
         """Pick from `choices`, which are in ascending order: a value between two selects the next one up."""
         shortcuts = {"MIN": choices[0], "MAX": choices[-1], "DEF": choices[1]}
-        value = shortcuts.get(word, _number(word))
+        value = shortcuts.get(word, parse_number(word))
         if value is None:
             self._errors.append(_ILLEGAL_PARAMETER)
             return None
@@ -580,7 +581,7 @@ class Simulator:
             self._ac_filter = AcFilter(chosen)
 
     def _get_ac_filter(self) -> str:
-        return _number_reply(self._ac_filter.hertz)
+        return number_reply(self._ac_filter.hertz)
 
     def _set_gate_time(self, function: Function, word: str) -> None:
         chosen = self._choose(word, [gate_time.value for gate_time in GateTime])
@@ -588,7 +589,7 @@ class Simulator:
             self._gate_times[function] = GateTime(chosen)
 
     def _get_gate_time(self, function: Function) -> str:
-        return _number_reply(self._gate_times[function].seconds)
+        return number_reply(self._gate_times[function].seconds)
 
     def _set_autozero(self, word: str) -> None:
         if word in ("ON", "1"):
@@ -622,7 +623,7 @@ class Simulator:
         elif word == "DEF":
             self._ranges[function] = None
         else:
-            value = _number(word)
+            value = parse_number(word)
             if value is None:
                 self._errors.append(_ILLEGAL_PARAMETER)
                 return
@@ -635,7 +636,7 @@ class Simulator:
 
     def _get_range(self, function: Function) -> str:
         fixed = self._ranges[function]
-        return _number_reply(fixed if fixed is not None else self._autorange(function))
+        return number_reply(fixed if fixed is not None else self._autorange(function))
 
     def _set_autorange(self, function: Function, word: str) -> None:
         if word in ("ON", "1"):
@@ -652,14 +653,14 @@ class Simulator:
 
     def _set_nplc(self, function: Function, word: str) -> None:
         shortcuts = {"MIN": NPLC_VALUES[0], "MAX": NPLC_VALUES[-1], "DEF": 10}
-        value = shortcuts.get(word, _number(word))
+        value = shortcuts.get(word, parse_number(word))
         if value is None or value not in NPLC_VALUES:
             self._errors.append(_ILLEGAL_PARAMETER)
         else:
             self._nplc[function] = value
 
     def _get_nplc(self, function: Function) -> str:
-        return _number_reply(self._nplc[function])
+        return number_reply(self._nplc[function])
 
     def _setup(self) -> Setup:
         """Return the Setup the Meter is in right now, as the Meter model describes it."""
@@ -693,7 +694,7 @@ class Simulator:
 
     def _measure(self, setup: Setup) -> str:
         """Take a Reading and return the Meter's reply: the measured value, or the Math Operation's result."""
-        return _number_reply(self._math.process(self._measured_value(setup)))
+        return number_reply(self._math.process(self._measured_value(setup)))
 
     def _measured_value(self, setup: Setup) -> float:
         function = setup.function
@@ -781,17 +782,5 @@ def _mnemonics(header: str) -> tuple[str, ...]:
     return tuple(parts[1:] if parts[0] == "SENS" and len(parts) > 1 else parts)
 
 
-def _number(word: str) -> float | None:
-    try:
-        value = float(word)
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _number_reply(value: float) -> str:
-    return f"{value + 0.0:+.8E}"
-
-
 def _overload(signal: float) -> float:
-    return math.copysign(_OVERLOAD_VALUE, signal)
+    return math.copysign(OVERLOAD_MAGNITUDE, signal)

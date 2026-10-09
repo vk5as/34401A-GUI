@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from agilent34401a.burst import trigger_delay_seconds
 from agilent34401a.meter import Setup, measurement_time
+from agilent34401a.sim_common import number_reply, parse_number
 from agilent34401a.trigger import MAX_COUNT, MAX_DELAY_S, READING_MEMORY_SIZE, TriggerSettings, TriggerSource
 
 _ILLEGAL_PARAMETER = '-224,"Illegal parameter value"'
@@ -45,10 +46,6 @@ class SimHost:
     reply: Callable[[str, float], None]
     time_scale: Callable[[], float]
     clock: Callable[[], float] = time.monotonic
-
-
-def _number_reply(value: float) -> str:
-    return f"{value + 0.0:+.8E}"
 
 
 class TriggerModel:
@@ -106,7 +103,7 @@ class TriggerModel:
             case "*OPC?":
                 self._operation_complete_query()
             case "*ESE":
-                value = _number(argument)
+                value = parse_number(argument)
                 if value is None:
                     self._host.error(_ILLEGAL_PARAMETER)
                 else:
@@ -180,13 +177,13 @@ class TriggerModel:
     def _delay_command(self, *, query: bool, argument: str) -> None:
         if query:
             delay = trigger_delay_seconds(self._setup()) if self.delay_auto else self.delay_s
-            self._host.reply(_number_reply(delay), 0.0)
+            self._host.reply(number_reply(delay), 0.0)
             return
         word = self._word(argument)
         if not word:
             self._host.error(_MISSING_PARAMETER)
             return
-        value = {"MIN": 0.0, "MAX": MAX_DELAY_S, "DEF": 0.0}.get(word, _number(word))
+        value = {"MIN": 0.0, "MAX": MAX_DELAY_S, "DEF": 0.0}.get(word, parse_number(word))
         if value is None:
             self._host.error(_ILLEGAL_PARAMETER)
         elif not 0 <= value <= MAX_DELAY_S:
@@ -209,14 +206,14 @@ class TriggerModel:
     def _count_command(self, attribute: str, *, query: bool, argument: str, infinite: bool) -> None:
         if query:
             value = getattr(self, attribute)
-            self._host.reply(_INFINITE_REPLY if value is None else _number_reply(value), 0.0)
+            self._host.reply(_INFINITE_REPLY if value is None else number_reply(value), 0.0)
             return
         word = self._word(argument)
         if not word:
             self._host.error(_MISSING_PARAMETER)
         elif word == "INF" and infinite:
             setattr(self, attribute, None)
-        elif (number := {"MIN": 1.0, "MAX": float(MAX_COUNT), "DEF": 1.0}.get(word, _number(word))) is None:
+        elif (number := {"MIN": 1.0, "MAX": float(MAX_COUNT), "DEF": 1.0}.get(word, parse_number(word))) is None:
             self._host.error(_ILLEGAL_PARAMETER)
         elif not 1 <= round(number) <= MAX_COUNT:
             self._host.error(_DATA_OUT_OF_RANGE)
@@ -353,7 +350,7 @@ class TriggerModel:
 
     def _points(self) -> None:
         self._sync()
-        self._host.reply(_number_reply(len(self._memory)), 0.0)
+        self._host.reply(number_reply(len(self._memory)), 0.0)
 
     def _fetch(self, *, erase: bool) -> None:
         self._sync()
@@ -381,11 +378,3 @@ class TriggerModel:
         readings = [self._host.measure() for _ in range(min(MAX_COUNT, triggers * self.sample_count))]
         self._memory.clear()
         self._host.reply(",".join(readings), triggers * period)
-
-
-def _number(word: str) -> float | None:
-    try:
-        value = float(word)
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None

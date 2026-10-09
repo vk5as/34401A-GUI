@@ -14,8 +14,9 @@ _MIN_PREFIX_EXPONENT = min(_PREFIXES)
 _MAX_PREFIX_EXPONENT = max(_PREFIXES)
 _PREFIX_STEP = 3
 
-# The Meter reports Overload as +/-9.9E+37; anything at or beyond this magnitude is an Overload.
-_OVERLOAD_MAGNITUDE = 9.9e37
+# The Meter reports Overload as +/-9.9E+37; anything at or beyond this magnitude is an Overload. It also says an
+# infinite Trigger Count that way.
+OVERLOAD_MAGNITUDE = 9.9e37
 
 _LINE_FREQUENCY_HZ = 50
 _AUTOZERO_FACTOR = 2  # with Autozero on, every Reading is an offset measurement plus the signal measurement
@@ -485,7 +486,7 @@ class Reading:
 
     @property
     def is_overload(self) -> bool:
-        return abs(self.value) >= _OVERLOAD_MAGNITUDE
+        return abs(self.value) >= OVERLOAD_MAGNITUDE
 
 
 def parse_reading(raw: str, function: Function) -> Reading:

@@ -26,7 +26,7 @@ OpenSerialPort = Callable[[SerialSettings], Transport]
 NOT_FOUND_GUIDANCE = (
     "Check that the cable is a null-modem (crossed) cable, that the Meter's I/O menu is set to RS-232 rather than "
     "GPIB, that this is the right port and no other program is using it, and that the Flow Control matches the "
-    "Meter's handshake."
+    "Meter's Flow Control setting."
 )
 
 _REPLY_BITS = 400  # *IDN?'s reply is some 40 characters of ten bits each
@@ -95,7 +95,7 @@ class ProbeResult:
             return self.problem
         advice = [NOT_FOUND_GUIDANCE]
         if not self.included_flow_control:
-            advice.append("Include Flow Control in the Probe to try the other handshakes as well.")
+            advice.append("Include Flow Control in the Probe to try the other Flow Controls as well.")
         return f"No Meter answered at any of the {self.tried} settings tried. {' '.join(advice)}"
 
 

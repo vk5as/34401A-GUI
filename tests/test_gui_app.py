@@ -250,7 +250,7 @@ def test_a_failed_connection_is_reported_and_leaves_the_window_usable(make_windo
     assert window.readout.cget("text") == NO_READING
 
 
-def test_a_device_that_is_not_a_34401a_is_refused(make_window):
+def test_a_meter_that_does_not_identify_as_a_34401a_is_refused(make_window):
     window = make_window(Simulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01"))
 
     pump(window, lambda: window.status_connection.cget("text").startswith("Connection failed"))

@@ -65,41 +65,41 @@ def test_chart_can_plot_against_the_sample_number_instead(make_chart):
     chart = make_chart()
     feed(chart, [1.0, 2.0, 4.0], start=100.0)
 
-    chart.set_x_axis(XAxis.SAMPLE)
+    chart.set_x_axis(XAxis.READING)
 
     assert plotted(chart) == ([1, 2, 3], [1.0, 2.0, 4.0])
-    assert chart.axes.get_xlabel() == "Sample number"
+    assert chart.axes.get_xlabel() == "Reading number"
 
 
 def test_choosing_the_x_axis_is_remembered_in_the_settings(make_chart, tmp_path):
     settings = Settings.load(tmp_path)
     chart = make_chart(settings)
 
-    chart.set_x_axis(XAxis.SAMPLE)
+    chart.set_x_axis(XAxis.READING)
 
-    assert Settings.load(tmp_path).chart_x_axis is XAxis.SAMPLE
+    assert Settings.load(tmp_path).chart_x_axis is XAxis.READING
 
 
 def test_chart_starts_on_the_x_axis_saved_in_the_settings(make_chart):
     settings = Settings.in_memory()
-    settings.chart_x_axis = XAxis.SAMPLE
+    settings.chart_x_axis = XAxis.READING
 
     chart = make_chart(settings)
 
-    assert chart.x_axis is XAxis.SAMPLE
-    assert chart.axes.get_xlabel() == "Sample number"
+    assert chart.x_axis is XAxis.READING
+    assert chart.axes.get_xlabel() == "Reading number"
 
 
 def test_the_x_axis_radio_buttons_switch_the_axis(make_chart):
     chart = make_chart()
     feed(chart, [1.0, 2.0])
 
-    chart.sample_axis_button.invoke()
+    chart.reading_axis_button.invoke()
     chosen = [chart.x_axis]
     chart.time_axis_button.invoke()
     chosen.append(chart.x_axis)
 
-    assert chosen == [XAxis.SAMPLE, XAxis.TIME]
+    assert chosen == [XAxis.READING, XAxis.TIME]
 
 
 def test_y_axis_names_the_function_and_unit_of_the_latest_readings(make_chart):
@@ -138,7 +138,7 @@ def test_a_break_marker_is_drawn_where_the_function_changes_and_the_line_does_no
 
 def test_a_break_marker_in_sample_numbers_sits_at_the_first_reading_of_the_new_function(make_chart):
     chart = make_chart()
-    chart.set_x_axis(XAxis.SAMPLE)
+    chart.set_x_axis(XAxis.READING)
     feed(chart, [1.0, 2.0])
     feed(chart, [1000.0], Function.RESISTANCE_2W, start=1.0)
 
@@ -443,7 +443,7 @@ def test_clear_history_from_the_menu_empties_the_history_and_restarts_sample_num
 
     assert len(window.chart.history) == 0
     pump(window, lambda: len(window.chart.history) >= 1)
-    assert window.chart.history.entries()[0].sample == 1
+    assert window.chart.history.entries()[0].number == 1
 
 
 def test_window_closing_leaves_no_chart_timer_behind(make_window):
@@ -459,9 +459,9 @@ def test_window_closing_leaves_no_chart_timer_behind(make_window):
 def test_the_x_axis_choice_in_the_window_is_saved_with_the_window_settings(make_window):
     window = make_window(Simulator())
 
-    window.chart.set_x_axis(XAxis.SAMPLE)
+    window.chart.set_x_axis(XAxis.READING)
 
-    assert window.settings.chart_x_axis is XAxis.SAMPLE
+    assert window.settings.chart_x_axis is XAxis.READING
 
 
 def test_a_long_history_is_redrawn_less_often_than_a_short_one(make_chart):

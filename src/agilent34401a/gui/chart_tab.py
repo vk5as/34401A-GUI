@@ -41,7 +41,7 @@ _MAX_LENGTH = 1_000_000
 _SPINBOX_STEP = 1000
 _MARGIN = 0.05  # of the span, left around the data when the view fits it
 _MAX_LABELLED_BREAKS = 8  # Break Markers named on the chart; older ones are just lines
-_X_LABELS = {XAxis.TIME: "Time (s)", XAxis.SAMPLE: "Sample number"}
+_X_LABELS = {XAxis.TIME: "Time (s)", XAxis.READING: "Reading number"}
 _EXPORT_SUFFIXES = (".png", ".svg")
 _EXPORT_DPI = 150
 
@@ -98,11 +98,11 @@ class ChartTab(ttk.Frame):
         self.time_axis_button = ttk.Radiobutton(
             bar, text="Time", value=XAxis.TIME.value, variable=self._x_axis_var, command=self._on_x_axis
         )
-        self.sample_axis_button = ttk.Radiobutton(
-            bar, text="Sample number", value=XAxis.SAMPLE.value, variable=self._x_axis_var, command=self._on_x_axis
+        self.reading_axis_button = ttk.Radiobutton(
+            bar, text="Reading number", value=XAxis.READING.value, variable=self._x_axis_var, command=self._on_x_axis
         )
         self.time_axis_button.pack(side="left")
-        self.sample_axis_button.pack(side="left", padx=(0, 12))
+        self.reading_axis_button.pack(side="left", padx=(0, 12))
         self.autoscale_button = ttk.Button(bar, text="Autoscale", command=self.fit_view)
         self.autoscale_button.pack(side="left", padx=(0, 12))
         self.clear_button = ttk.Button(bar, text="Clear History", command=self.clear)
@@ -251,13 +251,13 @@ class ChartTab(ttk.Frame):
     def _draw(self) -> None:
         entries = self.history.entries()
         origin = self.history.started_at or 0.0
-        by_sample = self.x_axis is XAxis.SAMPLE
+        by_number = self.x_axis is XAxis.READING
         xs: list[float] = []
         ys: list[float] = []
         breaks: list[HistoryEntry] = []
         positions: list[float] = []
         for entry in entries:
-            x = entry.sample if by_sample else entry.timestamp - origin
+            x = entry.number if by_number else entry.timestamp - origin
             if entry.follows_break and xs:
                 breaks.append(entry)
                 positions.append(x)

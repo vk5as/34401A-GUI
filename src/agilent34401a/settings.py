@@ -42,7 +42,12 @@ class XAxis(Enum):
     """What the chart plots Readings against."""
 
     TIME = "time"
-    SAMPLE = "sample"
+    READING = "reading"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "XAxis | None":
+        """Accept the name settings files had before the Reading was called one: "sample"."""
+        return cls.READING if value == "sample" else None
 
 
 @dataclass(frozen=True)

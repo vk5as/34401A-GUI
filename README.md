@@ -155,7 +155,7 @@ Export Burst as CSV…), View (Clear History, Compact mode, Theme) and Help (Sho
 
 | Tab | What it does |
 |---|---|
-| **Chart** | A live plot of the History (the most recent 10 000 Readings unless you set another length) against time or sample number. Pan, zoom, Autoscale, Clear History, Break Markers where the Function or unit changed, and a strip of N, Mean, Std dev, Min, Max, Pk-Pk and the count of overloads, calculated from the History. Export to PNG or SVG from the File menu. |
+| **Chart** | A live plot of the History (the most recent 10 000 Readings unless you set another length) against time or Reading number. Pan, zoom, Autoscale, Clear History, Break Markers where the Function or unit changed, and a strip of N, Mean, Std dev, Min, Max, Pk-Pk and the count of overloads, calculated from the History. Export to PNG or SVG from the File menu. |
 | **Sense** | AC Filter (3, 20 or 200 Hz), Gate Time, Autozero (on, off or once) and Input Impedance, each enabled only for the Functions it applies to. |
 | **Trigger** | Trigger Source, Trigger Delay, Sample Count and Trigger Count, and Start Burst. See [Single and Burst](#single-and-burst). |
 | **Math** | Null, dB, dBm, the Meter's Statistics and a Limit Test. See [Math](#math). |
@@ -328,7 +328,7 @@ itself, so disconnect first. When nothing answers it says what to check:
 
 - the cable must be a null-modem (crossed) cable, not a straight-through one;
 - the Meter's I/O menu must be set to RS-232 rather than GPIB, and its baud rate and parity set under that menu;
-- the Flow Control must match the Meter's handshake, which is why Probe can include it.
+- the Flow Control must match the Meter's own Flow Control setting, which is why Probe can include it.
 
 Linux caveat: pyserial does not implement DTR/DSR Flow Control in hardware on Linux; it only asserts DTR, and
 never waits for DSR. Windows implements it. On Linux, DTR/DSR therefore behaves like no Flow Control with DTR held

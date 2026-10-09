@@ -30,7 +30,7 @@ def test_settings_survive_a_save_and_load(tmp_path):
     settings.theme = Theme.DARK
     settings.compact_mode = True
     settings.history_length = 500
-    settings.chart_x_axis = XAxis.SAMPLE
+    settings.chart_x_axis = XAxis.READING
     settings.auto_reconnect = True
     settings.error_check_interval_s = 2.5
     settings.last_connection = LastConnection(
@@ -118,7 +118,7 @@ def test_a_bad_value_falls_back_to_its_default_without_losing_the_good_ones(tmp_
     assert settings.theme is Theme.SYSTEM
     assert settings.compact_mode is False
     assert settings.history_length == 10_000
-    assert settings.chart_x_axis is XAxis.SAMPLE
+    assert settings.chart_x_axis is XAxis.READING
     assert settings.auto_reconnect is True
     assert settings.error_check_interval_s == 5.0
     assert settings.last_connection is None
@@ -312,3 +312,18 @@ def test_a_remembered_connection_with_exotic_values_is_forgotten_not_a_crash(tmp
     (tmp_path / SETTINGS_FILE).write_text(json.dumps({"last_connection": connection}), encoding="utf-8")
 
     assert Settings.load(tmp_path).last_connection is None
+
+
+def test_the_chart_axis_stored_under_its_old_name_sample_is_still_understood(tmp_path):
+    (tmp_path / SETTINGS_FILE).write_text(json.dumps({"chart_x_axis": "sample"}), encoding="utf-8")
+
+    assert Settings.load(tmp_path).chart_x_axis is XAxis.READING
+
+
+def test_the_reading_number_axis_is_stored_as_reading(tmp_path):
+    settings = Settings.load(tmp_path)
+    settings.chart_x_axis = XAxis.READING
+    settings.save()
+
+    assert json.loads((tmp_path / SETTINGS_FILE).read_text(encoding="utf-8"))["chart_x_axis"] == "reading"
+    assert Settings.load(tmp_path).chart_x_axis is XAxis.READING

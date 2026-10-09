@@ -135,7 +135,13 @@ _Avoid_: Link, session (in UI)
 
 **Backend**:
 The VISA implementation carrying a Connection: the vendor VISA library (Keysight/NI) or pyvisa-py.
-_Avoid_: Driver, library
+_Avoid_: Driver (for this meaning; see **Driver** below), library
+
+**Transport**:
+The text channel to one Meter that a Connection provides: write a command, read a reply, clear, close. The Simulator is a Transport too, which is how everything above it is tested without a Meter.
+
+**Driver**:
+The application's own code that speaks SCPI to the Meter over a Transport: it identifies the Meter, reads and applies a Setup, takes Readings and drains the error queue. It is not a Backend, which is the VISA implementation underneath the Transport.
 
 **Framing**:
 The RS-232 character format: data bits, parity and stop bits together.

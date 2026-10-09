@@ -413,7 +413,7 @@ def test_shutdown_before_start_does_not_poison_a_later_start():
     assert worker.shutdown() is True
 
 
-def test_a_device_that_is_not_a_34401a_fails_the_connection_and_is_closed(started):
+def test_something_that_is_not_a_34401a_fails_the_connection_and_is_closed(started):
     simulator = HookedSimulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01")
     _worker, events = started(simulator)
 

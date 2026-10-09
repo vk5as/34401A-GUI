@@ -59,7 +59,7 @@ def test_history_default_length_matches_the_settings_default():
 def test_sample_numbers_count_from_one_and_survive_the_oldest_readings_being_forgotten():
     history = filled([1.0, 2.0, 3.0, 4.0], length=2)
 
-    assert [entry.sample for entry in history] == [3, 4]
+    assert [entry.number for entry in history] == [3, 4]
 
 
 def test_clear_empties_the_history_and_restarts_sample_numbers():
@@ -69,7 +69,7 @@ def test_clear_empties_the_history_and_restarts_sample_numbers():
     entry = history.add(reading(9.0), 10.0)
 
     assert values_of(history) == [9.0]
-    assert entry.sample == 1
+    assert entry.number == 1
 
 
 def test_shortening_the_history_drops_the_oldest_readings_at_once():
@@ -129,7 +129,7 @@ def test_break_marker_sits_before_the_first_reading_of_a_new_function():
     history.add(reading(100.0, Function.RESISTANCE_2W), 2.0)
     history.add(reading(101.0, Function.RESISTANCE_2W), 3.0)
 
-    assert [entry.sample for entry in history.break_markers()] == [3]
+    assert [entry.number for entry in history.break_markers()] == [3]
 
 
 def test_changing_function_to_one_with_the_same_unit_still_breaks_the_history():
@@ -137,7 +137,7 @@ def test_changing_function_to_one_with_the_same_unit_still_breaks_the_history():
     history.add(reading(1.0), 0.0)
     history.add(reading(1.0, Function.AC_VOLTAGE), 1.0)
 
-    assert [entry.sample for entry in history.break_markers()] == [2]
+    assert [entry.number for entry in history.break_markers()] == [2]
 
 
 def test_switching_to_dbm_or_back_breaks_the_history_because_the_unit_changed():
@@ -147,7 +147,7 @@ def test_switching_to_dbm_or_back_breaks_the_history_because_the_unit_changed():
     history.add(replace(reading(2.3), math=MathOperation.DBM), 2.0)
     history.add(reading(1.0), 3.0)
 
-    assert [entry.sample for entry in history.break_markers()] == [2, 4]
+    assert [entry.number for entry in history.break_markers()] == [2, 4]
 
 
 def test_switching_null_on_or_off_breaks_the_history_because_the_readings_no_longer_compare():
@@ -157,7 +157,7 @@ def test_switching_null_on_or_off_breaks_the_history_because_the_readings_no_lon
     history.add(replace(reading(0.26), math=MathOperation.NULL), 2.0)
     history.add(reading(1.0), 3.0)
 
-    assert [entry.sample for entry in history.break_markers()] == [2, 4]
+    assert [entry.number for entry in history.break_markers()] == [2, 4]
 
 
 def test_statistics_and_limit_tests_leave_the_readings_comparable():
@@ -176,7 +176,7 @@ def test_each_change_of_function_gets_its_own_break_marker():
     ):
         history.add(reading(1.0, function), float(index))
 
-    assert [entry.sample for entry in history.break_markers()] == [2, 4]
+    assert [entry.number for entry in history.break_markers()] == [2, 4]
 
 
 def test_a_break_marker_is_dropped_with_the_readings_around_it_once_they_are_forgotten():

@@ -117,6 +117,8 @@ _LONG_FORMS = {
     "DISPLAY": "DISP",
     "CLEAR": "CLE",
     "CALIBRATION": "CAL",
+    "CONFIGURE": "CONF",
+    "MEASURE": "MEAS",
     "COUNT": "COUN",
     "STRING": "STR",
     "RWLOCK": "RWL",
@@ -330,6 +332,8 @@ class Simulator:
             self._reply(self._errors.popleft() if self._errors else _NO_ERROR)
         elif key == "FUNC":
             self._function_command(query=query, argument=argument)
+        elif path[0] in ("CONF", "MEAS"):
+            self._configure_command(path, query=query, argument=argument)
         elif self._math.handles(key):
             if not self._math.command(key, query=query, argument=argument, function=self._function):
                 self._errors.append(_UNDEFINED_HEADER)
@@ -477,6 +481,39 @@ class Simulator:
             if function is not self._function:
                 self._math.function_changed()  # the Meter turns its Math Operation off with a change of Function
             self._function = function
+
+    def _configure_command(self, path: tuple[str, ...], *, query: bool, argument: str) -> None:
+        """`CONF:<function> [range]` selects a Function with its defaults; `MEAS:<function>? [range]` also reads it.
+
+        The defaults are autorange (or the given Range), the default Integration Time and an immediate trigger of one
+        Reading, with Math off. A resolution (the optional second parameter) is not modelled and is refused rather than
+        ignored, and `CONF?` is not modelled either. A refused command leaves the Meter as it was.
+        """
+        measuring = path[0] == "MEAS"
+        function = _FUNCTION_NAMES.get(":".join(path[1:]))
+        if function is None or query != measuring:
+            self._errors.append(_UNDEFINED_HEADER)
+            return
+        words = [word.strip().upper() for word in argument.split(",")] if argument else []
+        if len(words) > 1:
+            self._errors.append(_ILLEGAL_PARAMETER)
+            return
+        before, queued = self._store(), len(self._errors)
+        group = Function.DC_VOLTAGE if function is Function.DC_VOLTAGE_RATIO else function
+        self._function = function
+        self._math.function_changed()
+        self._trigger.restore(TriggerSettings())
+        if group in self._ranges:
+            self._ranges[group] = None
+            if words:
+                self._set_range(group, words[0])
+        if group in self._nplc:
+            self._nplc[group] = Setup.default(group).nplc or 0
+        if len(self._errors) > queued:
+            self._recall(before)  # whatever the Meter refused, it did not half-do
+            return
+        if measuring:
+            self._trigger.command("READ", query=True, argument="")
 
     def _setting_command(self, path: tuple[str, ...], *, query: bool, argument: str) -> bool:
         """Handle `<group>:RANG`, `<group>:RANG:AUTO` and `<group>:NPLC`; False when the header is not one."""

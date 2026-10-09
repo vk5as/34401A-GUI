@@ -11,6 +11,7 @@ from agilent34401a.sim import Simulator
 from agilent34401a.worker import (
     AdminFailed,
     Connected,
+    Disconnected,
     ErrorsReported,
     Event,
     LockoutChanged,
@@ -354,3 +355,31 @@ def test_asking_for_continuous_again_does_not_postpone_the_error_check(started):
     next_of(events, SystemRead)
 
     assert simulator.writes.count("*STB?") == 1
+
+
+def test_disconnecting_releases_a_lockout_the_application_started_before_it_hands_the_meter_back(started):
+    simulator = WatchedSimulator()
+    worker, events = started(simulator)
+    worker.set_lockout(locked=True)
+    next_of(events, LockoutChanged)
+
+    worker.disconnect()
+    next_of(events, Disconnected)
+
+    assert not simulator.front_panel_locked
+    assert "SYST:LOC" in simulator.writes  # released by the application, not by the Simulator's going to Local
+
+
+def test_disconnecting_without_a_lockout_sends_no_unlock_commands(started):
+    simulator = WatchedSimulator()
+    worker, events = started(simulator)
+    worker.set_lockout(locked=True)
+    next_of(events, LockoutChanged)
+    worker.set_lockout(locked=False)
+    next_of(events, LockoutChanged)
+    simulator.writes.clear()
+
+    worker.disconnect()
+    next_of(events, Disconnected)
+
+    assert "SYST:LOC" not in simulator.writes

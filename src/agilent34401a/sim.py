@@ -357,7 +357,7 @@ class Simulator:
             "SYST:BEEP": self._beep,
             "SYST:BEEP:STAT": lambda: self._switch_command("beeper_enabled", query=query, argument=argument),
             "SYST:RWL": lambda: setattr(self, "front_panel_locked", True),
-            "SYST:LOC": self.go_to_local,  # the RS-232 way back to Local: front panel and Local key included
+            "SYST:LOC": self._local_command,  # the RS-232 way back to Local: front panel and Local key included
             "SYST:REM": lambda: None,
             "DISP": lambda: self._switch_command("display_on", query=query, argument=argument),
             "DISP:TEXT": lambda: self._display_text_command(query=query, argument=argument),
@@ -643,9 +643,14 @@ class Simulator:
         self._signal_time += seconds
 
     def go_to_local(self) -> None:
+        """End Remote the way a bus-level go-to-local does: a lockout stays until something releases it (GTL alone does not)."""
         self._require_open()
         self.remote = False
-        self.front_panel_locked = False  # the front panel is in control again, Local key and all
+
+    def _local_command(self) -> None:
+        """`SYST:LOC`: Local, with the front panel's Local key working again."""
+        self.go_to_local()
+        self.front_panel_locked = False
 
     def close(self) -> None:
         self._closed = True

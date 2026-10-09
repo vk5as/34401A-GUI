@@ -303,7 +303,8 @@ agilent34401a-cli read --serial-port /dev/ttyUSB0 --baud 4800 --data-bits 7 --pa
 The options are `--baud` (300 to 9600), `--data-bits` (7 or 8), `--parity` (none, even, odd), `--stop-bits` (1 or 2),
 `--flow-control` (none, xonxoff, rtscts, dtrdsr), `--terminator` (lf, cr, crlf), and `--dtr`/`--rts` (on or off)
 to hold those lines for an unusual cable. The Meter is put in Remote with `SYST:REM` when the Connection opens and
-returned to Local with `SYST:LOC` when it closes. Lockout over RS-232 is `SYST:RWL`.
+returned to Local with `SYST:LOC` when it closes. Lockout over RS-232 is `SYST:RWL`; over GPIB it is the bus's own
+Local Lockout message, which the application releases before it disconnects.
 
 If you do not know the Meter's settings, use Probe: the Probe button in the dialog (with a progress bar and
 Cancel), or the `probe` subcommand, which prints the options that work and exits with 0 when it found a Meter:

@@ -397,6 +397,7 @@ class Worker:
         self._timeout_for = reading_timeout
         self._sentinel: Sentinel | None = None
         self._failures = 0  # replies lost or garbled since the last good one
+        self._locked_out = False  # the application locked the front panel's Local key out and has not released it
         self._next_error_check = 0.0
         self._requests: queue.Queue[_Request] = queue.Queue()
         self._thread = threading.Thread(target=self._main, name="agilent34401a-worker", daemon=True)
@@ -546,7 +547,10 @@ class Worker:
     def _connection(self, open_transport: Callable[[], Transport]) -> _Request | None:
         """Run one Connection from open to close; return the request that ended it, if one did and is not for it."""
         transport: Transport | None = None
+        driver: Driver | None = None
         ended_by: _Request | None = None
+        connection_lost = False
+        self._locked_out = False
         try:
             try:
                 transport = open_transport()
@@ -567,6 +571,7 @@ class Worker:
             try:
                 ended_by = self._serve(driver, transport)
             except TransportError as error:
+                connection_lost = True
                 _LOG.warning("The Connection was lost: %s", error)
                 self._events.put(ConnectionLost(str(error)))
         except Exception as error:  # noqa: BLE001 - the worker must never die silently; the UI reports it
@@ -574,9 +579,19 @@ class Worker:
             self._events.put(WorkerFailed(f"{type(error).__name__}: {error}"))
         finally:
             if transport is not None:
+                if self._locked_out and driver is not None and not connection_lost:
+                    self._unlock(driver)
                 self._release(transport)
             self._events.put(Disconnected())
         return None if isinstance(ended_by, _Disconnect) else ended_by
+
+    @staticmethod
+    def _unlock(driver: Driver) -> None:
+        """End a Lockout the application started: going to Local does not end it on GPIB, so it is done explicitly."""
+        try:
+            driver.unlock_front_panel()
+        except Exception:  # noqa: BLE001 - handing the Meter back matters more than why the unlock failed
+            _LOG.warning("Could not release the front panel's lockout", exc_info=True)
 
     @staticmethod
     def _release(transport: Transport) -> None:
@@ -896,9 +911,9 @@ class Worker:
         passed = driver.self_test()
         return [SelfTestFinished(passed=passed), *_report(driver.drain_errors())]
 
-    @staticmethod
-    def _lockout(driver: Driver, *, locked: bool) -> list[Event]:
+    def _lockout(self, driver: Driver, *, locked: bool) -> list[Event]:
         errors = driver.lock_front_panel() if locked else driver.unlock_front_panel()
+        self._locked_out = locked
         return [*_report(errors), LockoutChanged(locked=locked)]
 
 

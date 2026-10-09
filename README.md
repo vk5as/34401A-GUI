@@ -161,7 +161,7 @@ Export Burst as CSV…), View (Clear History, Compact mode, Theme) and Help (Sho
 | **Math** | Null, dB, dBm, the Meter's Statistics and a Limit Test. See [Math](#math). |
 | **Presets** | Named Setups to save, apply, rename, delete, export and import. See [Presets](#presets). |
 | **System** | Identity, firmware and SCPI version; Reset… (asks first) and Self-test; the front-panel Lockout; the beeper (with a test beep) and display (on or off, and a message of up to 12 characters); the calibration count and message, **read-only**; and the log of Meter errors with their time, code and message. |
-| **SCPI console** | A raw SCPI command or query and the Meter's reply, with Up/Down to recall earlier commands. Calibration writes are refused unless the override is ticked ([ADR-0006](docs/adr/0006-calibration-writes-are-blocked.md)). |
+| **SCPI console** | A raw SCPI command or query and the Meter's reply, with Up/Down to recall earlier commands. Calibration writes are refused unless the override is ticked, which covers the next command only ([ADR-0006](docs/adr/0006-calibration-writes-are-blocked.md)). |
 
 The Chart is the image at the top: 150 Readings of the Simulator's wandering DC voltage. The other tabs:
 

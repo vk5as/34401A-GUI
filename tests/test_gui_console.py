@@ -132,6 +132,20 @@ def test_a_calibration_write_is_refused_and_never_sent_unless_the_override_is_ti
     pump(window, lambda: "CAL:STR 'x'" in simulator.commands)
 
 
+def test_the_calibration_override_covers_one_command_only(make_window):
+    simulator = RecordingSimulator()
+    window = make_window(simulator)
+    pump(window, lambda: connected(window))
+    window.console.allow_calibration.set(value=True)
+
+    send(window, "CAL:STR 'x'")
+
+    assert not window.console.allow_calibration.get()
+    send(window, "CAL:STR 'y'")
+    pump(window, shows(window.console, "Refused:"))
+    assert "CAL:STR 'y'" not in simulator.commands
+
+
 def test_a_read_only_calibration_query_needs_no_override(make_window):
     simulator = RecordingSimulator()
     window = make_window(simulator)

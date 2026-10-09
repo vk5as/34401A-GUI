@@ -173,8 +173,9 @@ class ApplyReport:
 class PresetApplier:
     """Sends a Preset's Setup and works out how it went from the Worker's events. Feed it every event with `handle`.
 
-    `submit` sends a Setup to the Worker and says whether it did (it does not while the Meter is busy with another
-    change, or when there is no Connection). `on_report` is called with the `ApplyReport` as soon as the Meter has
+    `submit` sends a Setup to the Worker (with `apply_setup`: the answer is told from other changes by the Setup it
+    says it was `requested` for) and says whether it did (it does not while the Meter is busy with another change, or
+    when there is no Connection). `on_report` is called with the `ApplyReport` as soon as the Meter has
     said which Setup it is in, and once more, with the errors added, if its error queue then turns out to have held
     some: the Worker reports those right behind the Setup, so they belong to the same Preset.
     """
@@ -200,18 +201,20 @@ class PresetApplier:
 
     def handle(self, event: Event) -> None:
         match event:
-            case SetupChanged(actual):
-                pending, self._pending = self._pending, None
-                if pending is None:
-                    self._latest = None
+            case SetupChanged(actual, requested):
+                pending = self._pending
+                if pending is None or requested != pending.setup:
+                    self._latest = None  # a change somebody else asked for, which says nothing about the Preset
                     return
+                self._pending = None
                 self._report(ApplyReport(pending.name, rejected_settings(pending.setup, actual), actual=actual))
             case ErrorsReported(errors):
                 if self._latest is not None:
                     self._report(replace(self._latest, errors=errors))
                 self._latest = None
-            case SetupFailed(message):
-                self._fail(message)
+            case SetupFailed(message, requested):
+                if self._pending is not None and requested == self._pending.setup:
+                    self._fail(message)
             case ConnectionLost(message) | ConnectionFailed(message) | WorkerFailed(message):
                 self._fail(f"the Connection ended ({message})")
             case Disconnected():

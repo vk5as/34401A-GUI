@@ -129,9 +129,15 @@ class BurstFailed:
 
 @dataclass(frozen=True)
 class SetupChanged:
-    """The Meter's Setup, read back after a change; it differs from the one asked for if the Meter refused part."""
+    """The Meter's Setup, read back after a change; it differs from the one asked for if the Meter refused part.
+
+    `requested` is the Setup an `apply_setup` request asked for when this is the answer to one, so that whoever sent it
+    can tell its answer from the other changes (a raw command's, a Reading that put the trigger settings back). It
+    takes no part in comparing events.
+    """
 
     setup: Setup
+    requested: Setup | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -190,9 +196,13 @@ class AdminFailed:
 
 @dataclass(frozen=True)
 class SetupFailed:
-    """A Setup change could not be completed or confirmed; the Connection was resynchronised."""
+    """A Setup change could not be completed or confirmed; the Connection was resynchronised.
+
+    `requested` is as for `SetupChanged`.
+    """
 
     message: str
+    requested: Setup | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -645,7 +655,7 @@ class Worker:
             case _System():
                 self._administer(driver, transport, request)
             case _Apply(setup):
-                self._change_setup(driver, transport, partial(driver.apply, setup))
+                self._change_setup(driver, transport, partial(driver.apply, setup), requested=setup)
             case _Select(function):
                 self._change_setup(driver, transport, partial(driver.select_function, function))
             case _Raw(command, allow_calibration):
@@ -844,7 +854,14 @@ class Worker:
         else:
             resynchronise(transport, self._sentinel)
 
-    def _change_setup(self, driver: Driver, transport: Transport, change: Callable[[], list[QueuedError]]) -> None:
+    def _change_setup(
+        self,
+        driver: Driver,
+        transport: Transport,
+        change: Callable[[], list[QueuedError]],
+        *,
+        requested: Setup | None = None,
+    ) -> None:
         """Make a change to the Meter's Setup, then report the Setup it ended up in and any errors it queued."""
         try:
             errors = change()
@@ -853,12 +870,12 @@ class Worker:
             terminals = driver.read_terminals()
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not change the Setup, resynchronising the Connection: %s", error)
-            self._events.put(SetupFailed(str(error)))
+            self._events.put(SetupFailed(str(error), requested))
             self._recover(transport, error)
             return
         self._failures = 0
         transport.timeout = self._timeout_for(actual)
-        self._events.put(SetupChanged(actual))
+        self._events.put(SetupChanged(actual, requested))
         if terminals is not before:
             self._events.put(TerminalsChanged(terminals))
         if errors:

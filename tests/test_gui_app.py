@@ -21,6 +21,7 @@ from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, GateTime, Resolution
 from agilent34401a.settings import Settings, Theme
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
+from agilent34401a.worker import RawReplied
 
 TIMEOUT_S = 10.0
 
@@ -563,6 +564,18 @@ def test_the_error_is_cleared_by_the_next_successful_change(make_window):
 
     pump(window, lambda: window.status_error.cget("text") == "")
     assert window.range_box.get() == "10 V"
+
+
+def handled_everything_sent_so_far(window: MainWindow) -> None:
+    """Pump until the window has handled every event the Worker produced before it answered a marker request.
+
+    Requests are served in order and events arrive in order, so once the marker's answer is in, every Reading taken
+    before it has been handled: nothing is left in flight. (No sleeping and hoping.)
+    """
+    answered: list[RawReplied] = []
+    window.add_event_handler(lambda event: answered.append(event) if isinstance(event, RawReplied) else None)
+    window.worker.send_raw("*IDN?")
+    pump(window, lambda: bool(answered))
 
 
 def settle(window: MainWindow, simulator: CountingSimulator) -> None:

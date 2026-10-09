@@ -3,7 +3,7 @@ name: Release
 # Manual only; there is deliberately no push, tag or schedule trigger. Modelled on cpx400dp-gui.
 #
 # This is a pure-Python package, so it builds ONE universal wheel (py3-none-any) plus an sdist. That single wheel
-# is then installed into a clean virtual environment on real Windows, on every supported Python from 3.11 to
+# is then installed into a clean virtual environment on real Windows, on every supported Python from 3.10 to
 # 3.14, where the GUI is constructed against the Simulator and both command-line tools print --help. Only when
 # every gate has passed is a GitHub Release created, tagged v<version> from pyproject.toml.
 #
@@ -154,7 +154,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # 3.10 is the oldest the package claims; every dependency (matplotlib, numpy, pyvisa, pyvisa-py, pyserial) has a
+        # Windows wheel for it, so it installs without a compiler.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       # Only scripts/ is checked out, so the source tree cannot be imported by accident: the wheel is the only
       # copy of the package this job can see.

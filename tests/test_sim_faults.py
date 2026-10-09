@@ -62,7 +62,7 @@ def hung_up(client: socket.socket) -> bool:
 
 
 def test_a_slow_reply_arrives_late_but_arrives(server):
-    server.inject(Fault.slow(0.3))
+    server.inject(Fault.slow(1.0))
     with connect(server) as client:
         client.sendall(b"*IDN?\n")
         client.settimeout(0.05)
@@ -74,13 +74,13 @@ def test_a_slow_reply_arrives_late_but_arrives(server):
 
 
 def test_a_fault_applies_once_by_default_and_the_next_reply_is_prompt(server):
-    server.inject(Fault.slow(0.2))
+    server.inject(Fault.slow(2.0))
     with connect(server) as client:
         ask(client, "*IDN?")
 
         started = time.monotonic()
         assert ask(client, "FUNC?") == '"VOLT"\n'
-        assert time.monotonic() - started < 0.15
+        assert time.monotonic() - started < 1.0  # well under the 2 s the first reply was held for
 
 
 def test_a_slow_fault_can_apply_to_every_reply(server):
@@ -93,11 +93,11 @@ def test_a_slow_fault_can_apply_to_every_reply(server):
 
 
 def test_a_slow_fault_can_name_the_command_it_hits(server):
-    server.inject(Fault.slow(0.3, command="READ"))
+    server.inject(Fault.slow(2.0, command="READ"))
     with connect(server) as client:
         started = time.monotonic()
         assert ask(client, "*IDN?") == IDENTITY_LINE
-        assert time.monotonic() - started < 0.25
+        assert time.monotonic() - started < 1.0  # well under the 2 s a READ? is held for
 
         client.sendall(b"READ?\n")
         client.settimeout(0.05)

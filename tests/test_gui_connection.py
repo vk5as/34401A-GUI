@@ -225,7 +225,7 @@ def test_disconnecting_does_not_wait_for_a_reading_that_is_still_in_progress(mak
     began = time.monotonic()
     window.disconnect()
     window.root.update()
-    assert time.monotonic() - began < 0.25
+    assert time.monotonic() - began < 1.0  # the Reading is held until `release`, which is far longer
     assert status(window) == "Disconnecting…"
 
     release.set()

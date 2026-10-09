@@ -83,6 +83,18 @@ def next_event(events: "queue.Queue[Event]") -> Event:
     return events.get(timeout=TIMEOUT_S)
 
 
+def settled(worker: Worker, events: "queue.Queue[Event]") -> None:
+    """Prove the Worker has acted on every request sent before this and put out every event they led to.
+
+    Requests are served in order, so the answer to a raw query sent now comes after everything earlier requests
+    produced: if nothing but that answer arrives, nothing else was going to. (No sleeping and hoping.)
+    """
+    worker.send_raw("*IDN?")
+    marker = next_event(events)
+    assert isinstance(marker, RawReplied)
+    assert marker.command == "*IDN?"
+
+
 def next_reading(events: "queue.Queue[Event]") -> ReadingTaken:
     event = next_event(events)
     assert isinstance(event, ReadingTaken)
@@ -128,8 +140,7 @@ def test_worker_identifies_the_meter_on_connect_and_waits_for_a_request_before_r
     assert isinstance(event, Connected)
     assert event.identity.manufacturer == "Agilent Technologies"
     assert event.setup == Setup.default(Function.DC_VOLTAGE)
-    time.sleep(0.05)
-    assert events.empty()
+    settled(_worker, events)  # no Reading, nothing else, before the marker
     assert simulator.reads == 0
 
 
@@ -155,10 +166,9 @@ def test_pause_stops_continuous_and_it_can_be_resumed(started):
     worker.start_continuous()
     for _ in range(3):
         assert isinstance(next_event(events), ReadingTaken)
-    time.sleep(0.1)
+    settled(worker, events)
 
     assert simulator.reads == 3
-    assert events.empty()
 
     worker.start_continuous()
 
@@ -274,12 +284,10 @@ def idle_worker():
 def test_a_worker_without_a_connection_does_nothing_until_it_is_told_to_connect(idle_worker):
     worker, events = idle_worker()
     simulator = HookedSimulator()
-    time.sleep(0.05)
-    assert events.empty()
 
     worker.connect(lambda: simulator)
 
-    assert isinstance(next_event(events), Connected)
+    assert isinstance(next_event(events), Connected)  # the first event there is: nothing came before it
 
 
 def test_requests_for_a_connection_that_is_not_there_are_dropped_not_kept_for_the_next_one(idle_worker):
@@ -291,8 +299,7 @@ def test_requests_for_a_connection_that_is_not_there_are_dropped_not_kept_for_th
     worker.connect(lambda: simulator)
 
     assert isinstance(next_event(events), Connected)
-    time.sleep(0.05)
-    assert events.empty()
+    settled(worker, events)
     assert simulator.reads == 0
     assert not [command for command in simulator.writes if not command.endswith("?")]
 
@@ -688,8 +695,7 @@ def test_a_setup_change_that_succeeds_reports_no_errors(started):
     worker.apply_setup(Setup.default(Function.DIODE))
 
     assert isinstance(next_event(events), SetupChanged)
-    time.sleep(0.05)
-    assert events.empty()
+    settled(worker, events)
 
 
 def test_a_setup_change_the_worker_cannot_confirm_is_reported_and_the_worker_carries_on(started):
@@ -737,8 +743,7 @@ def test_a_raw_query_is_answered_with_the_reply_and_changes_no_setup(started):
     worker.send_raw("*IDN?")
 
     assert next_event(events) == RawReplied("*IDN?", AGILENT_IDENTITY, ())
-    time.sleep(0.05)
-    assert events.empty()
+    settled(worker, events)
 
 
 def test_a_raw_write_is_followed_by_the_setup_the_meter_is_now_in(started):

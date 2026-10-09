@@ -155,33 +155,43 @@ def test_status_bar_shows_the_reading_rate_while_running_and_clears_it_when_paus
     assert window.status_rate.cget("text") == ""
 
 
-def test_window_stays_responsive_while_readings_are_slow(make_window):
-    simulator = CountingSimulator(time_scale=1, sleep=time.sleep)  # 400 ms per Reading
+def test_window_stays_responsive_while_a_reading_is_slow(make_window):
+    simulator = CountingSimulator()
+    release = threading.Event()
+    simulator.hold_reading = (3, release)  # the third Reading stays in progress until released
     window = make_window(simulator)
-    pump(window, lambda: connected(window))
+    try:
+        pump(window, lambda: simulator.reads >= 3)
 
-    slowest_update = 0.0
-    deadline = time.monotonic() + TIMEOUT_S
-    while simulator.reads < 2 and time.monotonic() < deadline:
-        started = time.monotonic()
-        window.root.update()
-        slowest_update = max(slowest_update, time.monotonic() - started)
-        time.sleep(0.002)
+        slowest_update = 0.0
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            started = time.monotonic()
+            window.root.update()
+            slowest_update = max(slowest_update, time.monotonic() - started)
+            time.sleep(0.002)
 
-    assert simulator.reads >= 2
-    assert slowest_update < 0.25  # a window blocked on a Reading would stall for the full 400 ms
+        # A window blocked on the Reading would stall until it is released (up to TIMEOUT_S), not for a moment.
+        assert slowest_update < 1.0
+    finally:
+        release.set()
 
 
 def test_pausing_while_a_slow_reading_is_in_progress_does_not_block_the_window(make_window):
-    simulator = CountingSimulator(time_scale=1, sleep=time.sleep)  # 400 ms per Reading
+    simulator = CountingSimulator()
+    release = threading.Event()
+    simulator.hold_reading = (2, release)
     window = make_window(simulator)
-    pump(window, lambda: simulator.reads > 0)
+    try:
+        pump(window, lambda: simulator.reads >= 2)
 
-    started = time.monotonic()
-    window.run_button.invoke()
-    window.root.update()
+        started = time.monotonic()
+        window.run_button.invoke()
+        window.root.update()
 
-    assert time.monotonic() - started < 0.25
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
 
 
 def test_a_failed_connection_is_reported_and_leaves_the_window_usable(make_window):

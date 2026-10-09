@@ -68,7 +68,7 @@ def apply_theme(root: tk.Misc, theme: Theme) -> Palette:
     """Switch every ttk widget in the application to `theme` and return the colours now in force."""
     style = ttk.Style(root)
     if theme is Theme.SYSTEM:
-        palette = _use_system(style)
+        palette = _use_system(style, root)
     else:
         palette = LIGHT if theme is Theme.LIGHT else DARK
         _use_palette(style, palette)
@@ -93,22 +93,39 @@ def style_menu(menu: tk.Menu, palette: Palette) -> None:
     )
 
 
-def _use_system(style: ttk.Style) -> Palette:
+def _as_hex(widget: tk.Misc, colour: object, fallback: str) -> str:
+    """Return `colour` as `#rrggbb`, or `fallback` if Tk cannot resolve it.
+
+    A native ttk theme answers with whatever the OS calls its colours (`SystemButtonFace` on Windows). Tk knows
+    those names but matplotlib does not, so every colour is resolved to plain hex here.
+    """
+    try:
+        red, green, blue = widget.winfo_rgb(str(colour))
+    except tk.TclError:
+        return fallback
+    return f"#{red >> 8:02x}{green >> 8:02x}{blue >> 8:02x}"
+
+
+def _use_system(style: ttk.Style, root: tk.Misc) -> Palette:
     available = style.theme_names()
     for name in _SYSTEM_PREFERENCE:
         if name in available:
             style.theme_use(name)
             break
+
+    def looked_up(style_name: str, option: str, fallback: str) -> str:
+        return _as_hex(root, style.lookup(style_name, option), fallback)
+
     return Palette(
         name="System",
-        background=style.lookup("TFrame", "background") or LIGHT.background,
-        surface=style.lookup("TButton", "background") or LIGHT.surface,
-        foreground=style.lookup("TLabel", "foreground") or LIGHT.foreground,
+        background=looked_up("TFrame", "background", LIGHT.background),
+        surface=looked_up("TButton", "background", LIGHT.surface),
+        foreground=looked_up("TLabel", "foreground", LIGHT.foreground),
         accent=LIGHT.accent,
-        field_background=style.lookup("TEntry", "fieldbackground") or LIGHT.field_background,
-        trough=style.lookup("TScrollbar", "troughcolor") or LIGHT.trough,
+        field_background=looked_up("TEntry", "fieldbackground", LIGHT.field_background),
+        trough=looked_up("TScrollbar", "troughcolor", LIGHT.trough),
         select_foreground=LIGHT.select_foreground,
-        border=style.lookup("TFrame", "bordercolor") or LIGHT.border,
+        border=looked_up("TFrame", "bordercolor", LIGHT.border),
         warning=LIGHT.warning,
     )
 

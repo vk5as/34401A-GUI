@@ -770,6 +770,8 @@ def test_a_raw_write_the_meter_complains_about_reports_its_errors(started):
     replied = next_event(events)
     assert isinstance(replied, RawReplied)
     assert [queued.code for queued in replied.errors] == [-113]
+    # Every Meter error is also reported as such, which is what the error log and the status bar listen to.
+    assert collect_until(events, lambda event: isinstance(event, ErrorsReported))[-1] == ErrorsReported(replied.errors)
 
 
 def test_raw_commands_are_served_between_readings_while_continuous_runs(started):
@@ -799,6 +801,7 @@ def test_a_raw_query_that_times_out_is_reported_and_the_worker_carries_on(starte
     assert isinstance(failed, RawFailed)
     assert failed.command == "NOTAQUERY?"
     assert [queued.code for queued in failed.errors] == [-113]
+    assert next_event(events) == ErrorsReported(failed.errors)
     assert simulator.clears == 1
     worker.send_raw("*IDN?")
     assert isinstance(next_event(events), RawReplied)

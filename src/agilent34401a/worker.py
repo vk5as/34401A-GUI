@@ -805,12 +805,19 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("A raw command failed, resynchronising the Connection: %s", error)
             self._recover(transport, error)
-            self._events.put(RawFailed(command, str(error), self._drain_after_failure(driver, transport)))
+            errors = self._drain_after_failure(driver, transport)
+            self._events.put(RawFailed(command, str(error), errors))
+            for event in _report(list(errors)):
+                self._events.put(event)
             return
         self._failures = 0
         self._events.put(RawReplied(command, result.reply, result.errors))
         if result.changes_meter:  # it may have changed the Setup behind the application's back
             self._change_setup(driver, transport, list)
+        # Every Meter error is reported as one (the error log and the status bar listen for that), after the Setup,
+        # which would otherwise clear the status bar again.
+        for event in _report(list(result.errors)):
+            self._events.put(event)
 
     def _drain_after_failure(self, driver: Driver, transport: Transport) -> tuple[QueuedError, ...]:
         """Empty the error queue of a Meter that did not answer, so its complaint is not blamed on a later command."""

@@ -354,6 +354,8 @@ Setup).
 - A Connection that cannot send a device clear (a raw TCP socket, such as the `agilent34401a-sim` server) cannot
   cancel a wait for an external trigger, so the External source is disabled there, with a tooltip saying why.
 - The Meter's trigger settings are put back when the Burst ends, so Run and Single keep working.
+- Run and Single need one immediately triggered Reading. If the Meter is left on a bus or external trigger, or on
+  several Readings, they put it back to that (the Trigger Delay stays) and the Trigger tab shows the change.
 
 ## Math
 

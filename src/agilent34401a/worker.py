@@ -647,6 +647,7 @@ class Worker:
             return None
 
     def _take_reading(self, driver: Driver, transport: Transport) -> None:
+        trigger_before = driver.setup.trigger
         try:
             reading = driver.read()
         except (MalformedReplyError, TransportTimeoutError) as error:
@@ -655,6 +656,9 @@ class Worker:
             self._recover(transport, error)
             return
         self._failures = 0
+        if driver.setup.trigger != trigger_before:
+            # Single and Continuous need one immediately triggered Reading, so the Driver put the Meter back to that.
+            self._events.put(SetupChanged(driver.setup))
         self._events.put(ReadingTaken(reading, time.monotonic(), driver.setup, self._wall_clock()))
         if reading.math is MathOperation.STATISTICS:
             self._report_statistics(driver, transport)

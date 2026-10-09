@@ -176,7 +176,8 @@ class Driver:
 
         The Meter is first put back to one immediately triggered Reading if a Preset or a Burst left it otherwise,
         because `READ?` would wait for a bus trigger (and fail) or return several Readings. This is what Single and
-        Continuous use.
+        Continuous use. The Setup the driver remembers then has those trigger settings, so a caller that shows the Setup
+        (the Worker) must report that change: compare `setup.trigger` before and after.
 
         With a Limit Test running, the Meter's Questionable Data register says how the Reading did, which costs one more
         query. A Reading under Null, dB or dBm is the Operation's result, not the measured value.

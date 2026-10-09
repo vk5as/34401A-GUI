@@ -9,7 +9,7 @@ from agilent34401a.driver import QueuedError
 from agilent34401a.errors import TransportError
 from agilent34401a.meter import Function, Resolution, Setup, reading_timeout
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
-from agilent34401a.trigger import TriggerSettings
+from agilent34401a.trigger import TriggerSettings, TriggerSource
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
@@ -871,3 +871,22 @@ def test_a_fixed_trigger_delay_is_part_of_what_a_reading_may_take_so_readings_do
     assert next_event(events) == SetupChanged(delayed)
     assert simulator.timeout > 4.0
     assert isinstance(next_event(events), ReadingTaken)
+
+
+def test_a_reading_that_puts_the_trigger_settings_back_to_one_immediate_reading_says_so(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    several = Setup.default(Function.DC_VOLTAGE).with_trigger(TriggerSettings(TriggerSource.BUS, sample_count=10))
+    worker.apply_setup(several)
+    assert next_event(events) == SetupChanged(several)
+
+    worker.single()
+
+    changed = next_event(events)
+    assert isinstance(changed, SetupChanged)
+    assert changed.setup.trigger == TriggerSettings()
+    reading = next_reading(events)
+    assert reading.setup.trigger == TriggerSettings()
+    worker.single()
+    assert next_reading(events).reading.function is Function.DC_VOLTAGE  # nothing more to report the second time

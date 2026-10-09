@@ -99,16 +99,26 @@ def test_nothing_can_be_started_before_the_meter_is_connected_and_the_tooltips_s
 
 def test_the_controls_start_from_the_trigger_settings_the_meter_already_has(make_window):
     simulator = TriggeringSimulator()
-    for command in ("TRIG:SOUR BUS", "TRIG:DEL 0.25", "SAMP:COUN 30", "TRIG:COUN 4"):
-        simulator.write(command)
+    simulator.write("TRIG:DEL 0.25")  # Continuous, which starts on connect, leaves a fixed Trigger Delay alone
     window = make_window(simulator)
     pump(window, lambda: connected(window))
 
-    assert tab(window).settings == TriggerSettings(TriggerSource.BUS, 0.25, 30, 4)
-    assert tab(window).source_var.get() == "BUS"
+    assert tab(window).settings == TriggerSettings(TriggerSource.IMMEDIATE, 0.25, 1, 1)
+    assert tab(window).source_var.get() == "IMM"
     assert tab(window).delay_entry.get() == "0.25"
-    assert tab(window).sample_entry.get() == "30"
-    assert tab(window).trigger_entry.get() == "4"
+    assert tab(window).sample_entry.get() == "1"
+    assert tab(window).trigger_entry.get() == "1"
+
+
+def test_the_controls_show_the_one_immediate_reading_that_continuous_puts_a_burst_setup_back_to(make_window):
+    simulator = TriggeringSimulator()
+    for command in ("TRIG:SOUR BUS", "TRIG:DEL 0.25", "SAMP:COUN 30", "TRIG:COUN 4"):
+        simulator.write(command)
+    window = make_window(simulator)
+
+    pump(window, lambda: connected(window) and tab(window).source_var.get() == "IMM")
+
+    assert tab(window).settings == TriggerSettings(TriggerSource.IMMEDIATE, 0.25, 1, 1)
 
 
 def test_a_reset_meter_shows_an_automatic_delay_and_one_reading(make_window):

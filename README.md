@@ -423,7 +423,7 @@ defined in [CONTEXT.md](CONTEXT.md), and the reasons for the larger decisions ar
 ```
 
 All of it is configured in `pyproject.toml` and `.pre-commit-config.yaml`, and CI runs it on every push and pull request:
-the static analysis, the tests on Linux for Python 3.10 to 3.14 (under Xvfb) and on Windows for 3.13, the GUI smoke test,
+the static analysis, the tests on Linux for Python 3.10 to 3.14 (under Xvfb) and on Windows for 3.14, the GUI smoke test,
 the coverage gate, and a build of the wheel and sdist.
 
 The coverage gate covers everything except the `gui` package; GUI coverage is still shown in the

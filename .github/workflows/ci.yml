@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install package with dev dependencies
         run: |
           python -m pip install --upgrade pip
@@ -58,13 +58,13 @@ jobs:
         run: coverage report --omit="*/agilent34401a/gui/*" --fail-under=85
 
   test-windows:
-    name: Tests, Windows, Python 3.13
+    name: Tests, Windows, Python 3.14
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install package with dev dependencies
         run: |
           python -m pip install --upgrade pip
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
       - name: Install build tooling
         run: |
           python -m pip install --upgrade pip

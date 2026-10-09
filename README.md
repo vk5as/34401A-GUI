@@ -265,7 +265,11 @@ agilent34401a-cli raw --simulate "VOLT:DC:NPLC 10"        # a command: no reply,
 
 `log` takes Readings with the Meter's current Setup and writes them as CSV to standard output, or to a file with
 `-o`. Give `-n` (a number of Readings), `--duration` (seconds) or both; it stops at whichever comes first, and
-keeps the rows already written if it is interrupted or fails:
+keeps the rows already written if it is interrupted or fails. A Reading that is lost (a garbled or missing reply) is
+a warning on standard error, not the end: the log resynchronises the Connection and carries on, a lost Reading is not
+a row (so `-n 100` still ends with 100), and the exit code is 0 when the log completed. If 5 Readings in a row are lost,
+or the Meter does not answer the resynchronisation, the Meter is taken to be gone and `log` stops with an error and
+exit code 1:
 
 ```bash
 agilent34401a-cli log --simulate -n 100 -o capture.csv

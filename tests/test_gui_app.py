@@ -1,20 +1,27 @@
-import os
+import _tkinter
+import gc
 import re
 import threading
 import time
 import tkinter as tk
-from collections.abc import Callable, Iterator
+import weakref
+from collections.abc import Callable
+from functools import partial
 from tkinter import ttk
+from typing import cast
 
 import pytest
 
 from agilent34401a import __version__
 from agilent34401a.errors import TransportError
+from agilent34401a.gui import main_window as main_window_module
 from agilent34401a.gui.app import main
+from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.main_window import NO_READING, MainWindow
-from agilent34401a.meter import Function, Resolution
+from agilent34401a.meter import Function, GateTime, Resolution
+from agilent34401a.settings import Settings, Theme
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
-from agilent34401a.transport import Transport
+from agilent34401a.worker import RawReplied
 
 TIMEOUT_S = 10.0
 
@@ -54,55 +61,54 @@ def pump(window: MainWindow, until: Callable[[], bool], timeout: float = TIMEOUT
     while not until():
         if time.monotonic() > deadline:
             pytest.fail("timed out waiting for the window")
-        window.root.update()
+        _bounded_update(window.root)
         time.sleep(0.002)
+
+
+_MAX_STEPS_PER_UPDATE = 50
+
+
+def _bounded_update(root: tk.Misc) -> None:
+    """Like `root.update()`, but gives up after a few steps instead of running until nothing at all is due.
+
+    `update()` does not return while timers and idle callbacks keep coming due, which they do when the window's
+    handling of a flood of Readings takes longer than its poll interval (slow runners, coverage on Python 3.11). The
+    test could then never look at its condition or its deadline again.
+    """
+    for _ in range(_MAX_STEPS_PER_UPDATE):
+        if not root.tk.dooneevent(_tkinter.DONT_WAIT):
+            return
+
+
+def test_pump_comes_back_to_check_its_condition_even_when_timers_keep_each_other_due(make_window):
+    """Tk's `update()` runs until nothing is due, so two timers that each outlast the other's period never let it return.
+
+    That is what happened under coverage on Python 3.11, where a tick of the window's event handling took longer than
+    its poll interval and the tests hung for good in `update()`. `pump` takes a bounded number of steps instead.
+    """
+    window = make_window()
+    ticks = 0
+    running = True
+
+    def slow_timer() -> None:
+        nonlocal ticks
+        time.sleep(0.03)  # longer than the 10 ms until the other timer is due again
+        ticks += 1
+        if running:
+            window.root.after(10, slow_timer)
+
+    try:
+        window.root.after(0, slow_timer)
+        window.root.after(0, slow_timer)
+
+        pump(window, lambda: ticks >= 6, timeout=10)
+    finally:
+        running = False
 
 
 def pump_for(window: MainWindow, seconds: float) -> None:
     deadline = time.monotonic() + seconds
     pump(window, lambda: time.monotonic() >= deadline)
-
-
-_TK_START_ATTEMPTS = 3
-
-
-@pytest.fixture(scope="session")
-def tk_root() -> Iterator[tk.Tk]:
-    """One Tk interpreter for the whole run, with each test getting its own Toplevel on it.
-
-    Creating a fresh interpreter per test made Windows CI fail now and then with "Can't find a usable init.tcl".
-    """
-    root = None
-    for attempt in range(_TK_START_ATTEMPTS):
-        try:
-            root = tk.Tk()
-            break
-        except tk.TclError:
-            # CI always has a display (xvfb on Linux), so a missing one there is a failure, not a skip.
-            if attempt == _TK_START_ATTEMPTS - 1:
-                if os.environ.get("CI"):
-                    raise
-                pytest.skip("no display available")
-            time.sleep(0.5)
-    assert root is not None
-    root.withdraw()
-    yield root
-    root.destroy()
-
-
-@pytest.fixture
-def make_window(tk_root):
-    windows: list[MainWindow] = []
-
-    def make(simulator: Simulator | None = None, *, opener: Callable[[], Transport] | None = None) -> MainWindow:
-        meter = simulator if simulator is not None else Simulator()
-        window = MainWindow(tk.Toplevel(tk_root), opener or (lambda: meter), "Simulator")
-        windows.append(window)
-        return window
-
-    yield make
-    for window in windows:
-        window.close()
 
 
 def _exists(widget: tk.Misc) -> bool:
@@ -192,33 +198,43 @@ def test_status_bar_shows_the_reading_rate_while_running_and_clears_it_when_paus
     assert window.status_rate.cget("text") == ""
 
 
-def test_window_stays_responsive_while_readings_are_slow(make_window):
-    simulator = CountingSimulator(time_scale=1, sleep=time.sleep)  # 400 ms per Reading
+def test_window_stays_responsive_while_a_reading_is_slow(make_window):
+    simulator = CountingSimulator()
+    release = threading.Event()
+    simulator.hold_reading = (3, release)  # the third Reading stays in progress until released
     window = make_window(simulator)
-    pump(window, lambda: connected(window))
+    try:
+        pump(window, lambda: simulator.reads >= 3)
 
-    slowest_update = 0.0
-    deadline = time.monotonic() + TIMEOUT_S
-    while simulator.reads < 2 and time.monotonic() < deadline:
-        started = time.monotonic()
-        window.root.update()
-        slowest_update = max(slowest_update, time.monotonic() - started)
-        time.sleep(0.002)
+        slowest_update = 0.0
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            started = time.monotonic()
+            window.root.update()
+            slowest_update = max(slowest_update, time.monotonic() - started)
+            time.sleep(0.002)
 
-    assert simulator.reads >= 2
-    assert slowest_update < 0.25  # a window blocked on a Reading would stall for the full 400 ms
+        # A window blocked on the Reading would stall until it is released (up to TIMEOUT_S), not for a moment.
+        assert slowest_update < 1.0
+    finally:
+        release.set()
 
 
 def test_pausing_while_a_slow_reading_is_in_progress_does_not_block_the_window(make_window):
-    simulator = CountingSimulator(time_scale=1, sleep=time.sleep)  # 400 ms per Reading
+    simulator = CountingSimulator()
+    release = threading.Event()
+    simulator.hold_reading = (2, release)
     window = make_window(simulator)
-    pump(window, lambda: simulator.reads > 0)
+    try:
+        pump(window, lambda: simulator.reads >= 2)
 
-    started = time.monotonic()
-    window.run_button.invoke()
-    window.root.update()
+        started = time.monotonic()
+        window.run_button.invoke()
+        window.root.update()
 
-    assert time.monotonic() - started < 0.25
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
 
 
 def test_a_failed_connection_is_reported_and_leaves_the_window_usable(make_window):
@@ -235,7 +251,7 @@ def test_a_failed_connection_is_reported_and_leaves_the_window_usable(make_windo
     assert window.readout.cget("text") == NO_READING
 
 
-def test_a_device_that_is_not_a_34401a_is_refused(make_window):
+def test_a_meter_that_does_not_identify_as_a_34401a_is_refused(make_window):
     window = make_window(Simulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01"))
 
     pump(window, lambda: window.status_connection.cget("text").startswith("Connection failed"))
@@ -423,8 +439,6 @@ def test_integration_time_is_disabled_for_functions_that_have_none(make_window, 
     [
         Function.AC_VOLTAGE,
         Function.AC_CURRENT,
-        Function.FREQUENCY,
-        Function.PERIOD,
         Function.CONTINUITY,
         Function.DIODE,
     ],
@@ -439,6 +453,27 @@ def test_resolution_is_disabled_for_functions_that_measure_at_a_fixed_one(make_w
 
     assert str(window.resolution_box.cget("state")) == "disabled"
     assert window.resolution_box.get() == function.fixed_resolution.label
+
+
+@pytest.mark.parametrize(
+    ("function", "resolution", "gate_time"),
+    [
+        (Function.FREQUENCY, Resolution.SIX_HALF, GateTime.ONE_SECOND),
+        (Function.PERIOD, Resolution.FOUR_HALF, GateTime.TEN_MILLISECONDS),
+    ],
+)
+def test_resolution_of_frequency_and_period_is_chosen_through_the_gate_time(
+    make_window, function, resolution, gate_time
+):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    window.function_buttons[function].invoke()
+    pump(window, lambda: window.function_label.cget("text") == function.label)
+    assert str(window.resolution_box.cget("state")) == "readonly"
+
+    choose(window, window.resolution_box, resolution.label)
+
+    pump(window, lambda: window.setup_label.cget("text").endswith(f"{gate_time.label} gate"))
 
 
 @pytest.mark.parametrize("function", [Function.CONTINUITY, Function.DIODE])
@@ -529,6 +564,18 @@ def test_the_error_is_cleared_by_the_next_successful_change(make_window):
 
     pump(window, lambda: window.status_error.cget("text") == "")
     assert window.range_box.get() == "10 V"
+
+
+def handled_everything_sent_so_far(window: MainWindow) -> None:
+    """Pump until the window has handled every event the Worker produced before it answered a marker request.
+
+    Requests are served in order and events arrive in order, so once the marker's answer is in, every Reading taken
+    before it has been handled: nothing is left in flight. (No sleeping and hoping.)
+    """
+    answered: list[RawReplied] = []
+    window.add_event_handler(lambda event: answered.append(event) if isinstance(event, RawReplied) else None)
+    window.worker.send_raw("*IDN?")
+    pump(window, lambda: bool(answered))
 
 
 def settle(window: MainWindow, simulator: CountingSimulator) -> None:
@@ -648,31 +695,19 @@ def test_the_window_manager_close_button_closes_the_window_cleanly(make_window):
     assert window.worker_is_alive() is False
 
 
+@pytest.mark.usefixtures("tk_root")
 def test_running_the_app_with_simulate_shows_a_window_and_returns_success_when_it_is_closed(monkeypatch):
+    # `main` makes the application's own root, as it must; `tk_root` is here to skip when there is no display.
     shown_titles = []
 
     def close_immediately(self, _n=0):
         shown_titles.append(self.title())
         self.destroy()
 
-    try:
-        tk.Tk().destroy()
-    except tk.TclError:
-        if os.environ.get("CI"):
-            raise
-        pytest.skip("no display available")
     monkeypatch.setattr(tk.Tk, "mainloop", close_immediately)
 
     assert main(["--simulate"]) == 0
     assert shown_titles == [f"Agilent 34401A {__version__}"]
-
-
-def test_running_the_app_without_simulate_explains_that_connections_are_not_available_yet(capsys):
-    with pytest.raises(SystemExit) as exit_info:
-        main([])
-
-    assert exit_info.value.code == 2
-    assert "--simulate" in capsys.readouterr().err
 
 
 def test_version_flag_prints_the_version_and_exits_successfully(capsys):
@@ -681,3 +716,562 @@ def test_version_flag_prints_the_version_and_exits_successfully(capsys):
 
     assert exit_info.value.code == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_the_tab_strip_is_shown_once_a_feature_has_added_its_tab(make_window):
+    window = make_window()
+
+    assert window.notebook.winfo_manager() == "pack"
+    assert "System" in [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()]
+
+
+def test_added_tabs_appear_in_order_under_their_titles(make_window):
+    window = make_window()
+
+    window.add_tab("Trigger", ttk.Frame(window.notebook))
+    window.add_tab("Math", ttk.Frame(window.notebook))
+
+    assert [window.notebook.tab(tab, "text") for tab in window.notebook.tabs()][-2:] == ["Trigger", "Math"]
+    assert window.notebook.winfo_manager() == "pack"
+
+
+def test_the_window_keeps_the_settings_it_was_given(tk_root):
+    settings = Settings.in_memory()
+    window = MainWindow(tk.Toplevel(tk_root), Simulator, "Simulator", settings=settings)
+    try:
+        assert window.settings is settings
+    finally:
+        window.close()
+
+
+def test_a_window_without_settings_gets_defaults_that_are_never_saved(make_window):
+    window = make_window()
+
+    assert window.settings.path is None
+    assert window.settings.theme is Theme.SYSTEM
+
+
+def test_a_menu_command_runs_when_its_entry_is_invoked(make_window):
+    window = make_window()
+    calls = []
+
+    window.add_menu_command("File", "Connect…", lambda: calls.append("connect"))
+
+    menu = window.menu("File")
+    last = menu.index("end")
+    assert menu.entrycget(last, "label") == "Connect…"
+    menu.invoke(last)
+    assert calls == ["connect"]
+
+
+def test_menus_appear_in_the_usual_order_however_they_are_added(make_window):
+    window = make_window()
+
+    window.add_menu_command("Help", "Shortcuts", lambda: None)
+    window.add_menu_command("File", "Connect…", lambda: None)
+    window.add_menu_command("View", "Compact", lambda: None)
+
+    labels = [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
+    assert labels == ["File", "View", "Help"]
+
+
+def test_entries_added_to_a_menu_keep_their_order(make_window):
+    window = make_window()
+
+    window.add_menu_command("File", "Connect…", lambda: None)
+    window.add_menu_command("File", "Disconnect", lambda: None)
+
+    menu = window.menu("File")
+    assert [menu.entrycget(index, "label") for index in range(menu.index("end") + 1)][-2:] == ["Connect…", "Disconnect"]
+
+
+def test_the_menubar_is_shown_because_the_view_menu_is_always_there(make_window):
+    window = make_window()
+
+    assert str(window.root.cget("menu")) == str(window.menubar)
+    assert "View" in [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
+
+
+def test_an_unusual_menu_name_goes_after_the_usual_ones(make_window):
+    window = make_window()
+
+    window.add_menu_command("Tools", "Something", lambda: None)
+    window.add_menu_command("Help", "Shortcuts", lambda: None)
+
+    labels = [window.menubar.entrycget(index, "label") for index in range(window.menubar.index("end") + 1)]
+    assert labels == ["File", "View", "Help", "Tools"]
+
+
+def _style(window: MainWindow) -> ttk.Style:
+    return ttk.Style(window.root)
+
+
+def _settings_with(**fields) -> Settings:
+    settings = Settings.in_memory()
+    for name, value in fields.items():
+        setattr(settings, name, value)
+    return settings
+
+
+def _window_with(tk_root, settings: Settings) -> MainWindow:
+    return MainWindow(tk.Toplevel(tk_root), Simulator, "Simulator", settings=settings)
+
+
+def test_the_dark_theme_paints_the_window_dark_and_the_light_theme_light(tk_root):
+    backgrounds = {}
+    for theme in (Theme.DARK, Theme.LIGHT):
+        window = _window_with(tk_root, _settings_with(theme=theme))
+        try:
+            backgrounds[theme] = _style(window).lookup("TFrame", "background")
+        finally:
+            window.close()
+
+    assert backgrounds[Theme.DARK] == "#232629"
+    assert backgrounds[Theme.LIGHT] == "#f0f0f0"
+
+
+def _entry_count(menu: tk.Menu) -> int:
+    last = menu.index("end")
+    return 0 if last is None else last + 1
+
+
+def _choose_in_menu(menu: tk.Menu, label: str) -> None:
+    for index in range(_entry_count(menu)):
+        if menu.type(index) != "separator" and menu.entrycget(index, "label") == label:
+            menu.invoke(index)
+            return
+    pytest.fail(f"no {label!r} entry in the menu")
+
+
+def _submenu(window: MainWindow, menu: str, label: str) -> tk.Menu:
+    parent = window.menu(menu)
+    for index in range(_entry_count(parent)):
+        if parent.type(index) == "cascade" and parent.entrycget(index, "label") == label:
+            return cast("tk.Menu", parent.nametowidget(parent.entrycget(index, "menu")))
+    pytest.fail(f"no {label!r} submenu in the {menu} menu")
+
+
+def test_choosing_a_theme_in_the_view_menu_restyles_the_window_at_once_and_saves_the_choice(tk_root, tmp_path):
+    settings = Settings.load(tmp_path)
+    window = _window_with(tk_root, settings)
+    try:
+        _choose_in_menu(_submenu(window, "View", "Theme"), "Dark")
+
+        assert _style(window).lookup("TFrame", "background") == "#232629"
+        assert str(window.root.cget("background")) == "#232629"
+        assert settings.theme is Theme.DARK
+        assert Settings.load(tmp_path).theme is Theme.DARK
+    finally:
+        window.close()
+
+
+def _unwritable_settings(tmp_path) -> Settings:
+    """Settings whose folder cannot be made, because a file is in the way (true on every OS, whoever runs the test)."""
+    (tmp_path / "in-the-way").write_text("a file", encoding="utf-8")
+    return Settings.load(tmp_path / "in-the-way" / "folder")
+
+
+def test_a_theme_is_still_applied_when_the_settings_cannot_be_saved_and_the_status_bar_says_so(tk_root, tmp_path):
+    window = _window_with(tk_root, _unwritable_settings(tmp_path))
+    heard = []
+    try:
+        window.on_theme_changed(lambda palette: heard.append(palette.name))
+
+        window.set_theme(Theme.DARK)
+
+        assert heard == ["System", "Dark"]  # the callbacks (the chart's colours) still ran
+        assert str(window.root.cget("background")) == "#232629"
+        assert "Could not save the settings" in str(window.status_error.cget("text"))
+    finally:
+        window.close()
+
+
+def test_compact_mode_is_still_laid_out_when_the_settings_cannot_be_saved(tk_root, tmp_path):
+    window = _window_with(tk_root, _unwritable_settings(tmp_path))
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+
+        window.set_compact(compact=True)
+
+        assert not any(_shown(window.setup_label, window.raw_check, window.notebook))
+        assert "Could not save the settings" in str(window.status_error.cget("text"))
+    finally:
+        window.close()
+
+
+def test_a_callback_hears_the_palette_now_and_after_every_theme_change(make_window):
+    window = make_window()
+    heard = []
+
+    window.on_theme_changed(lambda palette: heard.append(palette.name))
+    window.set_theme(Theme.DARK)
+    window.set_theme(Theme.LIGHT)
+    window.set_theme(Theme.SYSTEM)
+
+    assert heard == ["System", "Dark", "Light", "System"]
+
+
+def test_system_leaves_the_light_and_dark_themes_alone_and_uses_a_native_ttk_theme(make_window):
+    window = make_window()
+
+    window.set_theme(Theme.DARK)
+    window.set_theme(Theme.SYSTEM)
+
+    assert _style(window).theme_use() not in {"agilent34401a_dark", "agilent34401a_light"}
+    assert _style(window).lookup("TFrame", "background") != "#232629"
+
+
+def test_the_error_message_in_the_status_bar_follows_the_theme(make_window):
+    window = make_window()
+
+    window.set_theme(Theme.DARK)
+    dark = _style(window).lookup("Error.TLabel", "foreground")
+    window.set_theme(Theme.LIGHT)
+    light = _style(window).lookup("Error.TLabel", "foreground")
+
+    assert dark != light
+    assert str(window.status_error.cget("style")) == "Error.TLabel"
+
+
+def test_the_readout_keeps_its_vfd_colours_in_every_theme(make_window):
+    window = make_window()
+    before = (str(window.readout.cget("bg")), str(window.readout.cget("fg")))
+
+    window.set_theme(Theme.LIGHT)
+
+    assert (str(window.readout.cget("bg")), str(window.readout.cget("fg"))) == before
+
+
+def test_menus_follow_the_theme_including_ones_added_later(make_window):
+    window = make_window()
+    window.set_theme(Theme.DARK)
+
+    window.add_menu_command("Tools", "Something", lambda: None)
+
+    assert str(window.menu("Tools").cget("background")) == window.palette.surface
+    window.set_theme(Theme.LIGHT)
+    assert str(window.menu("Tools").cget("background")) == window.palette.surface
+    assert window.palette.name == "Light"
+
+
+def press(widget: tk.Misc, key: str) -> None:
+    """Send the key to `widget` as if typed there; Tk delivers key events to the widget that has focus."""
+    widget.update()  # Windows will not move focus to a widget that has not been mapped yet
+    widget.focus_force()
+    widget.update()
+    widget.event_generate(f"<{key}>")
+    widget.update()
+
+
+def _shows_function(window: MainWindow, function: Function) -> bool:
+    """Whether the window shows `function` and is ready for the next change (not still waiting for the Meter)."""
+    ready = str(window.function_buttons[Function.DC_VOLTAGE].cget("state")) == "normal"
+    return ready and window.function_label.cget("text") == function.label
+
+
+def test_the_function_keys_select_the_eleven_functions_in_order(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+
+    for number, function in enumerate(Function, start=1):
+        press(window.root, f"Key-F{number}")
+        pump(window, partial(_shows_function, window, function))
+
+
+def test_r_runs_and_pauses_the_continuous_readings(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    assert window.run_button.cget("text") == "Pause"
+
+    press(window.root, "Key-r")
+    assert window.run_button.cget("text") == "Run"
+
+    press(window.root, "Key-R")
+    assert window.run_button.cget("text") == "Pause"
+
+
+def test_r_does_nothing_before_there_is_a_connection(make_window):
+    window = make_window(opener=lambda: (_ for _ in ()).throw(TransportError("no")))
+    pump(window, lambda: window.status_connection.cget("text").startswith("Connection failed"))
+
+    press(window.root, "Key-r")
+
+    assert window.run_button.cget("text") == "Run"
+
+
+def test_keys_without_ctrl_stay_quiet_while_a_text_field_has_focus(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    field = ttk.Entry(window.root)
+    field.pack()
+
+    press(field, "Key-r")
+    press(field, "Key-F3")
+
+    assert window.run_button.cget("text") == "Pause"
+    assert window.function_label.cget("text") == Function.DC_VOLTAGE.label
+
+
+def test_keys_still_work_while_a_read_only_combobox_has_focus(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+
+    press(window.range_box, "Key-r")
+
+    assert window.run_button.cget("text") == "Run"
+
+
+def test_ctrl_shortcuts_work_even_in_a_text_field(make_window):
+    # The console's entry is where this matters (Ctrl+K opens the console from inside it), and it is a widget the
+    # window really shows. A bare Text packed below everything else is squeezed out of a small Windows screen,
+    # never mapped, and never receives the key.
+    window = make_window()
+    calls = []
+    window.register_shortcut("Ctrl+J", "Test", lambda: calls.append("j"))
+    window.show_tab(CONSOLE_TITLE)
+
+    press(window.console.entry, "Control-Key-j")
+
+    assert calls == ["j"]
+
+
+def test_space_does_not_fire_a_shortcut_on_top_of_a_focused_button_pressing_itself(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    calls = []
+    {shortcut.sequence: shortcut for shortcut in window.shortcuts.entries()}["Space"].handler = lambda: calls.append(
+        "space"
+    )
+
+    press(window.run_button, "Key-space")
+    press(window.root, "Key-space")
+
+    assert calls == ["space"]
+
+
+def test_a_feature_registers_a_shortcut_and_it_runs_its_handler(make_window):
+    window = make_window()
+    calls = []
+
+    window.register_shortcut("Ctrl+J", "Jump", lambda: calls.append("jump"))
+    press(window.root, "Control-Key-j")
+
+    assert calls == ["jump"]
+
+
+def test_a_shortcut_cannot_be_taken_twice(make_window):
+    window = make_window()
+
+    with pytest.raises(ValueError, match="already used"):
+        window.register_shortcut("F1", "Something else", lambda: None)
+
+
+def _listed(window: MainWindow) -> dict[str, tuple[str, str]]:
+    table = window.shortcuts_table
+    rows = (table.item(row, "values") for row in table.get_children())
+    return {str(row[0]): (str(row[1]), str(row[2])) for row in rows}
+
+
+def test_help_shortcuts_lists_every_shortcut_marking_the_planned_ones(make_window):
+    window = make_window()
+
+    _choose_in_menu(window.menu("Help"), "Shortcuts")
+
+    listed = _listed(window)
+    assert [f"F{number}" for number in range(1, 12)] == [key for key in listed if key.startswith("F")]
+    assert listed["F2"][0] == "Select AC V"
+    assert listed["R"][1] == ""
+    assert listed["Ctrl+L"] == ("Start or stop recording", "")
+    assert listed["Space"] == ("Take a single Reading", "")
+    assert "planned" in listed["Ctrl+,"][1]
+
+
+def test_a_planned_shortcut_is_listed_as_available_once_a_feature_registers_it(make_window):
+    window = make_window()
+    window.shortcuts.plan("Ctrl+J", "Jump somewhere")
+    window.register_shortcut("Ctrl+J", "Jump somewhere", lambda: None)
+
+    window.show_shortcuts()
+
+    assert _listed(window)["Ctrl+J"] == ("Jump somewhere", "")
+    assert "planned" in _listed(window)["Ctrl+,"][1]
+
+
+def test_asking_for_the_shortcuts_twice_shows_one_window(make_window):
+    window = make_window()
+
+    window.show_shortcuts()
+    first = window.shortcuts_dialog
+    window.show_shortcuts()
+
+    assert window.shortcuts_dialog is first
+
+
+def _shown(*widgets: tk.Misc) -> list[bool]:
+    """Whether each widget is placed in the window (asking the layout, not whether the OS has mapped it yet)."""
+    return [bool(widget.winfo_manager()) for widget in widgets]
+
+
+def _compact_toggle(window: MainWindow) -> None:
+    _choose_in_menu(window.menu("View"), "Compact mode")
+
+
+def test_compact_mode_keeps_the_readout_the_function_buttons_run_and_the_three_settings_controls(tk_root):
+    window = _window_with(tk_root, _settings_with(compact_mode=True))
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+        window.root.update()
+
+        kept = [
+            window.readout,
+            window.function_label,
+            window.function_buttons[Function.DC_VOLTAGE],
+            window.run_button,
+            window.range_box,
+            window.resolution_box,
+            window.nplc_box,
+        ]
+        dropped = [window.setup_label, window.raw_check]
+        assert all(_shown(*kept))
+        assert not any(_shown(*dropped))
+        assert not any(_shown(window.notebook))
+    finally:
+        window.close()
+
+
+def test_the_view_menu_switches_compact_mode_on_and_off_and_saves_it(tk_root, tmp_path):
+    settings = Settings.load(tmp_path)
+    window = _window_with(tk_root, settings)
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+        _compact_toggle(window)
+        window.root.update()
+
+        assert settings.compact_mode is True
+        assert Settings.load(tmp_path).compact_mode is True
+        assert not any(_shown(window.setup_label, window.raw_check, window.notebook))
+
+        _compact_toggle(window)
+        window.root.update()
+
+        assert Settings.load(tmp_path).compact_mode is False
+        assert all(
+            _shown(window.run_button, window.setup_label, window.resolution_box, window.raw_check, window.notebook)
+        )
+    finally:
+        window.close()
+
+
+def test_leaving_compact_mode_puts_everything_back_in_its_place(tk_root):
+    window = _window_with(tk_root, _settings_with(compact_mode=True))
+    try:
+        window.set_compact(compact=False)
+        window.root.update()
+
+        order = sorted(
+            (window.run_button, window.range_box, window.resolution_box, window.nplc_box, window.raw_check),
+            key=lambda widget: widget.winfo_x(),
+        )
+        assert order == [window.run_button, window.range_box, window.resolution_box, window.nplc_box, window.raw_check]
+        assert window.setup_label.winfo_y() < window.readout.winfo_y()
+    finally:
+        window.close()
+
+
+def test_compact_mode_still_takes_readings_and_r_still_pauses(tk_root):
+    window = _window_with(tk_root, _settings_with(compact_mode=True))
+    try:
+        pump(window, lambda: shows_reading(window))
+
+        press(window.root, "Key-r")
+
+        assert window.run_button.cget("text") == "Run"
+    finally:
+        window.close()
+
+
+def _ignore_palette(_window: MainWindow, _palette: object) -> None:
+    pass
+
+
+def test_a_closed_window_is_freed_at_once_not_by_the_cycle_collector_in_whichever_thread_runs_it(tk_root):
+    """Tk variables must be finalised on the main thread, so a closed window may not sit in a reference cycle."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        window = _window_with(tk_root, Settings.in_memory())
+        window.register_shortcut("Ctrl+J", "Jump", window.close)  # a handler that is a method of the window
+        window.on_theme_changed(partial(_ignore_palette, window))
+        window.close()
+        freed = weakref.ref(window)
+        del window
+        assert freed() is None
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+class _Cyclic:
+    """Garbage that only the cyclic collector can free."""
+
+    def __init__(self) -> None:
+        self.me = self
+
+
+def test_the_window_collects_cyclic_garbage_itself_when_automatic_collection_is_off(make_window, monkeypatch):
+    # With automatic collection on, the cyclic collector can run on the Worker thread and finalise Tk objects
+    # there, which aborts the process. The application turns it off and the window collects on the Tk thread.
+    monkeypatch.setattr(main_window_module, "_GC_EVERY_TICKS", 1)
+    window = make_window()
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        garbage = _Cyclic()
+        reference = weakref.ref(garbage)
+        del garbage
+
+        pump(window, lambda: reference() is None)
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def test_the_window_leaves_the_collector_alone_while_automatic_collection_is_on(make_window, monkeypatch):
+    monkeypatch.setattr(main_window_module, "_GC_EVERY_TICKS", 1)
+    collections: list[bool] = []
+
+    def collect(*_args: object) -> int:
+        collections.append(True)
+        return 0
+
+    monkeypatch.setattr(gc, "collect", collect)
+    # Report the collector as on without really turning it on: the Worker thread must not get a chance to run it
+    # while a window is open (ADR-0008).
+    monkeypatch.setattr(gc, "isenabled", lambda: True)
+    window = make_window()
+    pump_for(window, 0.2)
+
+    assert collections == []
+
+
+@pytest.mark.usefixtures("tk_root")
+def test_running_the_app_turns_automatic_collection_off_for_the_life_of_the_window_only(monkeypatch):
+    # `main` makes the application's own root, as it must; `tk_root` is here to skip when there is no display.
+    seen = []
+
+    def run_and_note(self, _n=0):
+        seen.append(gc.isenabled())
+        self.destroy()
+
+    monkeypatch.setattr(tk.Tk, "mainloop", run_and_note)
+    was_enabled = gc.isenabled()
+    gc.enable()
+    try:
+        assert main(["--simulate"]) == 0
+        after = gc.isenabled()
+    finally:
+        if not was_enabled:
+            gc.disable()
+
+    assert seen == [False]
+    assert after is True

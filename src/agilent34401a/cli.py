@@ -3,16 +3,19 @@
 import argparse
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
+from functools import partial
+from pathlib import Path
 
-from agilent34401a import __version__
+from agilent34401a import __version__, cli_admin, cli_log, cli_raw, cli_serial
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings, open_transport
-from agilent34401a.driver import Driver, QueuedError
+from agilent34401a.driver import RECALL_LOCATIONS, STORE_LOCATIONS, Driver, QueuedError
 from agilent34401a.errors import InvalidSetupError, MeterError
 from agilent34401a.meter import Function, Resolution, Setup, format_reading, reading_timeout
 from agilent34401a.sim import Simulator
-from agilent34401a.transport import Transport
+from agilent34401a.transport import LocalControl, RemoteControl, Transport
 
 _PROG = "agilent34401a-cli"
 _USAGE_ERROR = 2
@@ -40,13 +43,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(title="commands", dest="command")
-    read_parser = subparsers.add_parser(
-        "read",
-        help="take one Reading and print it",
-        description="Take one Reading. Options you leave out keep the Meter's current Setup.",
-    )
-    read_parser.add_argument("--simulate", action="store_true", help="use the built-in Simulator instead of a Meter")
-    connection = read_parser.add_argument_group(
+    # Each subcommand lives in its own _add_<name>_command and registers here with one line.
+    _add_read_command(subparsers)
+    _add_raw_command(subparsers)
+    _add_log_command(subparsers)
+    _add_admin_commands(subparsers)
+    _add_memory_commands(subparsers)
+    _add_probe_command(subparsers)
+
+    args = parser.parse_args(argv)
+    handler: Callable[[argparse.Namespace], int] | None = getattr(args, "handler", None)
+    if handler is None:
+        parser.print_help()
+        return 0
+    return handler(args)
+
+
+def add_connection_options(parser: argparse.ArgumentParser) -> None:
+    """Add `--simulate` and the Connection options every subcommand that talks to a Meter shares."""
+    parser.add_argument("--simulate", action="store_true", help="use the built-in Simulator instead of a Meter")
+    connection = parser.add_argument_group(
         "Connection", "Which Meter to talk to; the default is GPIB board 0, address 22."
     )
     connection.add_argument(
@@ -57,53 +73,262 @@ def main(argv: Sequence[str] | None = None) -> int:
     connection.add_argument("--gpib-board", type=int, help="the GPIB board index (default 0)")
     connection.add_argument("--gpib-address", type=int, help="the Meter's GPIB address (default 22)")
     connection.add_argument("--resource", help="a raw VISA resource string, instead of the GPIB board and address")
-    read_parser.add_argument(
+    cli_serial.add_serial_options(parser)
+
+
+def add_command(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    name: str,
+    handler: Callable[[argparse.Namespace], int],
+    *,
+    summary: str,
+    description: str | None = None,
+) -> argparse.ArgumentParser:
+    """Register a subcommand whose `handler` receives the parsed arguments and returns the exit code."""
+    parser = subparsers.add_parser(name, help=summary, description=description or summary)
+    parser.set_defaults(handler=handler, parser=parser)
+    return parser
+
+
+def run_on_meter(args: argparse.Namespace, action: Callable[[Driver, Transport], int]) -> int:
+    """Connect as `args` ask, identify the Meter, run `action`, and always close the Transport.
+
+    A failure talking to the Meter is printed on stderr and gives exit code 1; the Transport is closed either way.
+    """
+    settings = connection_settings(args, args.parser)
+    try:
+        transport = Simulator() if settings is None else open_transport(settings)
+    except MeterError as error:
+        sys.stderr.write(f"{_PROG}: error: {error}\n")
+        return 1
+    try:
+        if isinstance(transport, RemoteControl):
+            transport.go_to_remote()  # RS-232 only listens to a Meter that has been told it is Remote
+        driver = Driver(transport)
+        driver.identify()
+        return action(driver, transport)
+    except MeterError as error:
+        sys.stderr.write(f"{_PROG}: error: {error}\n")
+        return 1
+    finally:
+        _release(transport)
+
+
+def _release(transport: Transport) -> None:
+    """Give the Meter back to its front panel (ADR-0004) and close the Transport; neither may fail the exit."""
+    with suppress(MeterError):
+        if isinstance(transport, LocalControl):
+            transport.go_to_local()
+    with suppress(MeterError):
+        transport.close()
+
+
+def _add_read_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "read",
+        _run_read,
+        summary="take one Reading and print it",
+        description="Take one Reading. Options you leave out keep the Meter's current Setup.",
+    )
+    add_connection_options(parser)
+    parser.add_argument(
         "--function",
         choices=sorted(_FUNCTIONS),
         help="the Function to measure; it keeps its own Range and Resolution unless those are given too",
     )
-    read_parser.add_argument(
+    parser.add_argument(
         "--range", dest="range_", metavar="RANGE", help=f"the Range in volts, amps or ohms, or '{_AUTO}' for Autorange"
     )
-    read_parser.add_argument(
+    parser.add_argument(
         "--resolution",
         type=float,
         choices=[resolution.value for resolution in Resolution],
         help="the Resolution in digits",
     )
 
-    args = parser.parse_args(argv)
-    if args.command == "read":
-        range_ = _parse_range(args.range_, read_parser)
-        settings = _connection_settings(args, read_parser)
-        try:
-            transport = Simulator() if settings is None else open_transport(settings)
-        except MeterError as error:
-            sys.stderr.write(f"{_PROG}: error: {error}\n")
-            return 1
-        return _read(transport, args.function, range_, args.resolution)
-    parser.print_help()
-    return 0
+
+def _add_admin_commands(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Register `idn`, `reset`, `selftest` and `errors`; what they do lives in `cli_admin`."""
+    commands = (
+        ("idn", cli_admin.idn, "print the Meter's identity and firmware revision", None),
+        (
+            "reset",
+            cli_admin.reset,
+            "reset the Meter to its power-on Setup (*RST)",
+            "Reset the Meter. This is the only command that changes the Meter's Setup without being told what to change.",
+        ),
+        (
+            "selftest",
+            cli_admin.selftest,
+            "run the Meter's self-test (about 10 s)",
+            "Run the Meter's self-test, which takes about ten seconds. Exit code 0 means it passed.",
+        ),
+        (
+            "errors",
+            cli_admin.errors,
+            "print and clear the Meter's error queue",
+            "Print every error in the Meter's error queue, oldest first, which also empties it.",
+        ),
+    )
+    for name, action, summary, description in commands:
+        parser = add_command(subparsers, name, partial(_run_admin, action), summary=summary, description=description)
+        add_connection_options(parser)
 
 
-def _connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ConnectionSettings | None:
+def _add_memory_commands(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Register `save` and `recall`, which use the Meter's own Meter Memory; what they do lives in `cli_admin`."""
+    commands = (
+        (
+            "save",
+            cli_admin.save,
+            STORE_LOCATIONS,
+            "store the Meter's Setup in Meter Memory location 1 to 3 (*SAV)",
+            (
+                "Store the Meter's whole Setup in one of its own numbered, unnamed Meter Memory locations, overwriting "
+                "what was there. Location 0 is the Meter's power-down state and cannot be stored to."
+            ),
+        ),
+        (
+            "recall",
+            cli_admin.recall,
+            RECALL_LOCATIONS,
+            "replace the Meter's Setup with Meter Memory location 0 to 3 (*RCL)",
+            (
+                "Replace the Meter's Setup with the one in a Meter Memory location (0 is its power-down state), then "
+                "read back and print the Setup it is in. A location that was never stored is an error."
+            ),
+        ),
+    )
+    for name, action, locations, summary, description in commands:
+        parser = add_command(subparsers, name, partial(_run_memory, action), summary=summary, description=description)
+        parser.add_argument(
+            "location",
+            type=int,
+            choices=locations,
+            metavar="LOCATION",
+            help=f"the Meter Memory location, {locations.start} to {locations[-1]}",
+        )
+        add_connection_options(parser)
+
+
+def _run_memory(action: Callable[[Driver, int], int], args: argparse.Namespace) -> int:
+    return run_on_meter(args, lambda driver, _transport: action(driver, args.location))
+
+
+def _run_admin(action: Callable[[Driver], int], args: argparse.Namespace) -> int:
+    return run_on_meter(args, lambda driver, _transport: action(driver))
+
+
+def _run_read(args: argparse.Namespace) -> int:
+    range_ = _parse_range(args.range_, args.parser)
+    return run_on_meter(
+        args, lambda driver, transport: _read(driver, transport, args.function, range_, args.resolution)
+    )
+
+
+def _add_raw_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "raw",
+        _run_raw,
+        summary="send a raw SCPI command or query and print the reply",
+        description=(
+            "Send one raw SCPI command or query (several may be joined with ';') and print the Meter's reply. "
+            "Commands that would change the Meter's calibration are refused unless --allow-calibration is given."
+        ),
+    )
+    add_connection_options(parser)
+    parser.add_argument("command", help="the SCPI command or query, quoted so the shell passes it as one argument")
+    parser.add_argument(
+        "--allow-calibration",
+        action="store_true",
+        help="send calibration commands (CAL:SEC, CAL:VAL, CAL, CAL:STR) instead of refusing them; this can "
+        "invalidate the Meter's calibration",
+    )
+
+
+def _run_raw(args: argparse.Namespace) -> int:
+    return run_on_meter(
+        args,
+        lambda driver, transport: cli_raw.send_raw(
+            driver, transport, args.command, allow_calibration=args.allow_calibration, prog=_PROG
+        ),
+    )
+
+
+def _add_log_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "log",
+        _run_log,
+        summary="take Readings and write them as CSV",
+        description=(
+            "Take Readings with the Meter's current Setup and write them as CSV, to standard output or a file. "
+            "Give --count, --duration or both; the log ends at whichever comes first. The columns are "
+            "timestamp_iso, elapsed_s, function, range, value, unit, raw, math_mode and limit_result."
+        ),
+    )
+    add_connection_options(parser)
+    parser.add_argument("-n", "--count", type=_positive_int, help="stop after this many Readings")
+    parser.add_argument("--duration", type=_positive_seconds, metavar="SECONDS", help="stop after this many seconds")
+    parser.add_argument("-o", "--output", type=Path, help="write the CSV to this file instead of standard output")
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        message = f"expected a whole number of at least 1, got {text!r}"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
+def _positive_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        message = f"expected a number of seconds above 0, got {text!r}"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
+def _run_log(args: argparse.Namespace) -> int:
+    return run_on_meter(
+        args,
+        lambda driver, transport: cli_log.log(
+            driver, transport, count=args.count, duration_s=args.duration, output=args.output, prog=_PROG
+        ),
+    )
+
+
+def connection_settings(args: argparse.Namespace, parser: argparse.ArgumentParser) -> ConnectionSettings | None:
     """Build the Connection settings from the command line, or None when the Simulator was asked for."""
     chosen = {
         "--backend": args.backend,
         "--gpib-board": args.gpib_board,
         "--gpib-address": args.gpib_address,
         "--resource": args.resource,
+        "--serial-port": args.serial_port,
     }
-    given = [name for name, value in chosen.items() if value is not None]
+    given = [name for name, value in chosen.items() if value is not None] + cli_serial.serial_options_given(args)
     if args.simulate:
         if given:
             parser.error(f"--simulate cannot be combined with {', '.join(given)}")
         return None
     if args.resource is not None and ("--gpib-board" in given or "--gpib-address" in given):
         parser.error("--resource cannot be combined with --gpib-board or --gpib-address")
+    serial = cli_serial.serial_settings(args, parser)
+    if serial is not None and given_bus_options(given):
+        parser.error(f"--serial-port cannot be combined with {', '.join(given_bus_options(given))}")
     defaults = ConnectionSettings()
     try:
         return ConnectionSettings(
+            serial=serial,
             backend=defaults.backend if args.backend is None else Backend(args.backend),
             resource=args.resource,
             gpib_board=defaults.gpib_board if args.gpib_board is None else args.gpib_board,
@@ -111,6 +336,26 @@ def _connection_settings(args: argparse.Namespace, parser: argparse.ArgumentPars
         )
     except ValueError as error:
         parser.error(str(error))
+
+
+def given_bus_options(given: list[str]) -> list[str]:
+    """Pick the GPIB and raw-resource options out of the options given, which an RS-232 Connection cannot have."""
+    return [name for name in given if name in {"--resource", "--gpib-board", "--gpib-address"}]
+
+
+def _add_probe_command(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    parser = add_command(
+        subparsers,
+        "probe",
+        cli_serial.run_probe,
+        summary="find the RS-232 settings the Meter answers at",
+        description=(
+            "Probe a serial port: try every baud rate and Framing (and with --include-flow-control, every Flow "
+            "Control) until the Meter answers *IDN?, and print the options that work. Ctrl-C cancels. "
+            "Exit code 0 means a Meter was found."
+        ),
+    )
+    cli_serial.add_probe_options(parser)
 
 
 def _parse_range(text: str | None, parser: argparse.ArgumentParser) -> float | str | None:
@@ -128,27 +373,21 @@ def _parse_range(text: str | None, parser: argparse.ArgumentParser) -> float | s
     return value
 
 
-def _read(transport: Transport, function: str | None, range_: float | str | None, digits: float | None) -> int:
-    try:
-        driver = Driver(transport)
-        driver.identify()
-        if function is not None and _report(driver.select_function(_FUNCTIONS[function])):
-            return 1
-        current = driver.read_setup()
-        try:
-            wanted = _wanted_setup(current, range_, digits)
-        except InvalidSetupError as error:
-            sys.stderr.write(f"{_PROG}: error: {error}\n")
-            return _USAGE_ERROR
-        if wanted != current and _report(driver.apply(wanted)):
-            return 1
-        transport.timeout = reading_timeout(driver.setup)
-        sys.stdout.write(f"{format_reading(driver.read(), driver.setup.resolution)}\n")
-    except MeterError as error:
-        sys.stderr.write(f"{_PROG}: error: {error}\n")
+def _read(
+    driver: Driver, transport: Transport, function: str | None, range_: float | str | None, digits: float | None
+) -> int:
+    if function is not None and _report(driver.select_function(_FUNCTIONS[function])):
         return 1
-    finally:
-        transport.close()
+    current = driver.read_setup()
+    try:
+        wanted = _wanted_setup(current, range_, digits)
+    except InvalidSetupError as error:
+        sys.stderr.write(f"{_PROG}: error: {error}\n")
+        return _USAGE_ERROR
+    if wanted != current and _report(driver.apply(wanted)):
+        return 1
+    transport.timeout = reading_timeout(driver.setup)
+    sys.stdout.write(f"{format_reading(driver.read(), driver.setup.resolution)}\n")
     return 0
 
 

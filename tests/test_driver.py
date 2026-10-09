@@ -1,7 +1,12 @@
 import pytest
 
 from agilent34401a.driver import Driver, Identity, QueuedError
-from agilent34401a.errors import MalformedReplyError, UnrecognisedIdentityError
+from agilent34401a.errors import (
+    CalibrationBlockedError,
+    MalformedReplyError,
+    TransportTimeoutError,
+    UnrecognisedIdentityError,
+)
 from agilent34401a.meter import Function, Resolution, Setup
 from agilent34401a.sim import AGILENT_IDENTITY, HEWLETT_PACKARD_IDENTITY, Simulator
 
@@ -203,7 +208,14 @@ def test_apply_sends_function_then_range_then_integration_time_then_checks_the_e
 
     Driver(transport).apply(Setup.default(Function.DC_VOLTAGE).with_range(10.0).with_nplc(1))
 
-    assert transport.commands == ['FUNC "VOLT:DC"', "VOLT:DC:RANG 10", "VOLT:DC:NPLC 1", "SYST:ERR?"]
+    assert transport.commands == [
+        'FUNC "VOLT:DC"',
+        "VOLT:DC:RANG 10",
+        "VOLT:DC:NPLC 1",
+        "ZERO:AUTO ON",
+        "INP:IMP:AUTO OFF",
+        "SYST:ERR?",
+    ]
 
 
 def test_apply_switches_autorange_on_rather_than_sending_a_range():
@@ -211,7 +223,7 @@ def test_apply_switches_autorange_on_rather_than_sending_a_range():
 
     Driver(transport).apply(Setup.default(Function.AC_CURRENT))
 
-    assert transport.commands == ['FUNC "CURR:AC"', "CURR:AC:RANG:AUTO ON", "SYST:ERR?"]
+    assert transport.commands == ['FUNC "CURR:AC"', "CURR:AC:RANG:AUTO ON", "DET:BAND 20", "SYST:ERR?"]
 
 
 @pytest.mark.parametrize(
@@ -219,10 +231,13 @@ def test_apply_switches_autorange_on_rather_than_sending_a_range():
     [
         (Function.CONTINUITY, ['FUNC "CONT"', "SYST:ERR?"]),
         (Function.DIODE, ['FUNC "DIOD"', "SYST:ERR?"]),
-        (Function.FREQUENCY, ['FUNC "FREQ"', "FREQ:VOLT:RANG:AUTO ON", "SYST:ERR?"]),
-        (Function.PERIOD, ['FUNC "PER"', "PER:VOLT:RANG:AUTO ON", "SYST:ERR?"]),
-        (Function.RESISTANCE_4W, ['FUNC "FRES"', "FRES:RANG:AUTO ON", "FRES:NPLC 10", "SYST:ERR?"]),
-        (Function.DC_VOLTAGE_RATIO, ['FUNC "VOLT:DC:RAT"', "VOLT:DC:RANG:AUTO ON", "VOLT:DC:NPLC 10", "SYST:ERR?"]),
+        (Function.FREQUENCY, ['FUNC "FREQ"', "FREQ:VOLT:RANG:AUTO ON", "FREQ:APER 0.1", "SYST:ERR?"]),
+        (Function.PERIOD, ['FUNC "PER"', "PER:VOLT:RANG:AUTO ON", "PER:APER 0.1", "SYST:ERR?"]),
+        (Function.RESISTANCE_4W, ['FUNC "FRES"', "FRES:RANG:AUTO ON", "FRES:NPLC 10", "ZERO:AUTO ON", "SYST:ERR?"]),
+        (
+            Function.DC_VOLTAGE_RATIO,
+            ['FUNC "VOLT:DC:RAT"', "VOLT:DC:RANG:AUTO ON", "VOLT:DC:NPLC 10", "ZERO:AUTO ON", "SYST:ERR?"],
+        ),
     ],
 )
 def test_apply_only_sends_the_settings_a_function_has(function, commands):
@@ -308,7 +323,9 @@ def test_read_setup_rejects_a_function_it_does_not_know(reply):
 
 @pytest.mark.parametrize("reply", ['"VOLT"', "VOLT", '"volt"', '"VOLT:DC"', ' "VOLT"\r\n'])
 def test_read_setup_understands_the_forms_the_meter_may_name_dc_voltage_in(reply):
-    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01")).read_setup()
+    trigger_default = ("IMM", "1", "+1", "+1")  # TRIG:SOUR?, TRIG:DEL:AUTO?, SAMP:COUN? and TRIG:COUN?
+    math_off = ("0", "0", "0", "+6.00000000E+02", "0", "0")  # CALC:STAT? and the settings of the Math Operations
+    setup = Driver(AnswersInOrder(reply, "1", "+1.00000000E+01", "1", "0", *trigger_default, *math_off)).read_setup()
 
     assert setup.function is Function.DC_VOLTAGE
 
@@ -379,3 +396,94 @@ def test_select_function_makes_the_driver_read_in_that_function_and_reports_erro
 
     assert errors == [QueuedError(-224, "Illegal parameter value")]
     assert driver.setup.function is Function.PERIOD
+
+
+def test_send_raw_returns_the_reply_to_a_query_and_sends_nothing_else():
+    transport = RecordingTransport(Simulator(identity=AGILENT_IDENTITY))
+
+    result = Driver(transport).send_raw("*IDN?")
+
+    assert result.reply == AGILENT_IDENTITY
+    assert result.errors == ()
+    assert not result.changes_meter
+    assert transport.commands == ["*IDN?"]
+
+
+def test_send_raw_writes_a_command_and_checks_the_error_queue():
+    transport = RecordingTransport(Simulator())
+
+    result = Driver(transport).send_raw("VOLT:DC:NPLC 10")
+
+    assert result.reply is None
+    assert result.errors == ()
+    assert result.changes_meter
+    assert transport.commands == ["VOLT:DC:NPLC 10", "SYST:ERR?"]
+    assert Driver(transport).read_setup().nplc == 10
+
+
+def test_send_raw_reports_what_the_meter_complained_about():
+    result = Driver(Simulator()).send_raw("NOTACOMMAND")
+
+    assert [queued.code for queued in result.errors] == [-113]
+
+
+def test_send_raw_of_a_command_and_a_query_together_returns_the_reply_and_checks_errors():
+    transport = AnswersInOrder("+1", '+0,"No error"')
+
+    result = Driver(transport).send_raw("VOLT:DC:NPLC 1;NPLC?")
+
+    assert result.reply == "+1"
+    assert result.changes_meter
+    assert transport.commands == ["VOLT:DC:NPLC 1;NPLC?", "SYST:ERR?"]
+
+
+def test_send_raw_lets_a_query_time_out_so_the_caller_can_resynchronise():
+    with pytest.raises(TransportTimeoutError):
+        Driver(Simulator()).send_raw("NOTAQUERY?")
+
+
+@pytest.mark.parametrize("command", ["CAL:SEC:STAT OFF,HP034401", "cal:val 1", "FUNC?;:CAL:STR 'x'", "CAL?"])
+def test_send_raw_never_sends_a_calibration_write_to_the_meter(command):
+    transport = RecordingTransport(Simulator())
+
+    with pytest.raises(CalibrationBlockedError):
+        Driver(transport).send_raw(command)
+
+    assert transport.commands == []
+
+
+def test_send_raw_sends_a_calibration_write_when_it_is_explicitly_allowed():
+    transport = RecordingTransport(Simulator())
+
+    Driver(transport).send_raw("CAL:STR 'x'", allow_calibration=True)
+
+    assert transport.commands[0] == "CAL:STR 'x'"
+
+
+def test_send_raw_sends_a_read_only_calibration_query_without_an_override():
+    transport = ScriptedTransport("+3")
+
+    result = Driver(transport).send_raw("CAL:COUN?")
+
+    assert result.reply == "+3"
+    assert transport.commands == ["CAL:COUN?"]
+
+
+@pytest.mark.parametrize("command", ["", "  ", " ; "])
+def test_send_raw_refuses_an_empty_command(command):
+    transport = RecordingTransport(Simulator())
+
+    with pytest.raises(ValueError, match="Nothing to send"):
+        Driver(transport).send_raw(command)
+
+    assert transport.commands == []
+
+
+@pytest.mark.parametrize("command", ["*IDN?\nFUNC?", "*RST\r\n*CLS"])
+def test_send_raw_refuses_more_than_one_line(command):
+    transport = RecordingTransport(Simulator())
+
+    with pytest.raises(ValueError, match="one line"):
+        Driver(transport).send_raw(command)
+
+    assert transport.commands == []

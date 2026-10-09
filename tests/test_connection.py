@@ -1,7 +1,13 @@
 import pytest
 
 from agilent34401a.backend import CONCRETE_BACKENDS, Backend, BackendStatus, detect_backends, resolve_backend
-from agilent34401a.connection import ConnectionSettings, open_transport
+from agilent34401a.connection import (
+    BackendScan,
+    ConnectionSettings,
+    detect_all_backends,
+    open_transport,
+    scan_resources,
+)
 from agilent34401a.errors import BackendUnavailableError, TransportError
 from agilent34401a.sim import Simulator
 
@@ -179,3 +185,65 @@ def test_an_explicit_backend_that_is_missing_never_reaches_pyvisa():
         )
 
     assert opener.calls == []
+
+
+def test_detecting_all_backends_checks_the_real_pyvisa_and_pyvisa_py_is_installed():
+    found = detect_all_backends()
+
+    assert list(found) == list(CONCRETE_BACKENDS)
+    assert found[Backend.PYVISA_PY].available
+    assert found[Backend.VENDOR].available or found[Backend.VENDOR].reason
+
+
+class Listing:
+    """Stands in for pyvisa's resource listing: what each library can see, or why it cannot."""
+
+    def __init__(self, resources: dict[str, list[str] | Exception]) -> None:
+        self.resources = resources
+        self.asked: list[str] = []
+
+    def __call__(self, library: str) -> list[str]:
+        self.asked.append(library)
+        found = self.resources[library]
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+
+def test_scanning_with_auto_lists_what_each_available_backend_can_see():
+    list_visa = Listing({"@ivi": ["GPIB0::22::INSTR"], "@py": ["ASRL/dev/ttyS0::INSTR"]})
+
+    found = scan_resources(Backend.AUTO, detect=lambda _requested: statuses(AVAILABLE), list_visa=list_visa)
+
+    assert found == {
+        Backend.VENDOR: BackendScan(resources=("GPIB0::22::INSTR",)),
+        Backend.PYVISA_PY: BackendScan(resources=("ASRL/dev/ttyS0::INSTR",)),
+    }
+
+
+def test_scanning_skips_a_backend_that_is_unavailable_and_says_why():
+    list_visa = Listing({"@py": []})
+
+    found = scan_resources(Backend.AUTO, detect=lambda _requested: statuses(MISSING_VENDOR), list_visa=list_visa)
+
+    assert found[Backend.VENDOR] == BackendScan(problem=MISSING_VENDOR.reason)
+    assert found[Backend.PYVISA_PY] == BackendScan()
+    assert list_visa.asked == ["@py"]
+
+
+def test_scanning_one_backend_only_asks_that_backend():
+    list_visa = Listing({"@py": ["TCPIP::10.0.0.5::5025::SOCKET"]})
+
+    found = scan_resources(Backend.PYVISA_PY, detect=lambda requested: {requested: AVAILABLE}, list_visa=list_visa)
+
+    assert list(found) == [Backend.PYVISA_PY]
+    assert list_visa.asked == ["@py"]
+
+
+def test_a_backend_that_fails_to_scan_does_not_hide_what_the_others_found():
+    list_visa = Listing({"@ivi": TransportError("the bus is down"), "@py": ["GPIB0::22::INSTR"]})
+
+    found = scan_resources(Backend.AUTO, detect=lambda _requested: statuses(AVAILABLE), list_visa=list_visa)
+
+    assert found[Backend.VENDOR] == BackendScan(problem="the bus is down")
+    assert found[Backend.PYVISA_PY] == BackendScan(resources=("GPIB0::22::INSTR",))

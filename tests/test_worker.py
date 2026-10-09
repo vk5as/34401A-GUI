@@ -9,12 +9,17 @@ from agilent34401a.driver import QueuedError
 from agilent34401a.errors import TransportError
 from agilent34401a.meter import Function, Resolution, Setup, reading_timeout
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
+from agilent34401a.trigger import TriggerSettings, TriggerSource
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
+    ConnectionLost,
     Disconnected,
     ErrorsReported,
     Event,
+    RawFailed,
+    RawRefused,
+    RawReplied,
     ReadingFailed,
     ReadingTaken,
     SetupChanged,
@@ -39,6 +44,11 @@ class HookedSimulator(Simulator):
         self.writes: list[str] = []
         self.refuse_ranges_of: str | None = None
         self.garbage_function = False
+        self.go_to_local_calls = 0
+
+    def go_to_local(self) -> None:
+        self.go_to_local_calls += 1
+        super().go_to_local()
 
     def write(self, command: str) -> None:
         self.writes.append(command)
@@ -66,8 +76,24 @@ class HookedSimulator(Simulator):
         super().close()
 
 
+def remote(simulator: Simulator) -> bool:
+    return simulator.remote  # a function, so the type checker does not assume the answer cannot change
+
+
 def next_event(events: "queue.Queue[Event]") -> Event:
     return events.get(timeout=TIMEOUT_S)
+
+
+def settled(worker: Worker, events: "queue.Queue[Event]") -> None:
+    """Prove the Worker has acted on every request sent before this and put out every event they led to.
+
+    Requests are served in order, so the answer to a raw query sent now comes after everything earlier requests
+    produced: if nothing but that answer arrives, nothing else was going to. (No sleeping and hoping.)
+    """
+    worker.send_raw("*IDN?")
+    marker = next_event(events)
+    assert isinstance(marker, RawReplied)
+    assert marker.command == "*IDN?"
 
 
 def next_reading(events: "queue.Queue[Event]") -> ReadingTaken:
@@ -115,8 +141,7 @@ def test_worker_identifies_the_meter_on_connect_and_waits_for_a_request_before_r
     assert isinstance(event, Connected)
     assert event.identity.manufacturer == "Agilent Technologies"
     assert event.setup == Setup.default(Function.DC_VOLTAGE)
-    time.sleep(0.05)
-    assert events.empty()
+    settled(_worker, events)  # no Reading, nothing else, before the marker
     assert simulator.reads == 0
 
 
@@ -142,10 +167,9 @@ def test_pause_stops_continuous_and_it_can_be_resumed(started):
     worker.start_continuous()
     for _ in range(3):
         assert isinstance(next_event(events), ReadingTaken)
-    time.sleep(0.1)
+    settled(worker, events)
 
     assert simulator.reads == 3
-    assert events.empty()
 
     worker.start_continuous()
 
@@ -213,6 +237,159 @@ def test_shutdown_reports_failure_when_a_reading_will_not_finish(started):
     assert worker.shutdown() is True
 
 
+def test_a_shutdown_request_returns_at_once_and_the_worker_reports_disconnected_when_it_is_done(started):
+    simulator = HookedSimulator()
+    release = threading.Event()
+    worker, events = started(simulator)
+
+    def block(_count: int) -> None:
+        release.wait(TIMEOUT_S)
+
+    simulator.before_reading = block
+    next_event(events)
+    worker.start_continuous()
+    deadline = time.monotonic() + TIMEOUT_S
+    while simulator.reads == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    began = time.monotonic()
+    worker.disconnect()
+    assert time.monotonic() - began < 0.5  # the Reading in progress has not finished, and nothing waited for it
+    assert worker.is_alive()
+
+    release.set()
+    seen = collect_until(events, lambda event: isinstance(event, Disconnected))
+
+    assert isinstance(seen[-1], Disconnected)
+    assert not remote(simulator)
+    assert simulator.closed is True
+
+
+@pytest.fixture
+def idle_worker():
+    """A Worker with no Connection yet, as the main window starts it."""
+    workers = []
+
+    def make() -> tuple[Worker, "queue.Queue[Event]"]:
+        events: queue.Queue[Event] = queue.Queue()
+        worker = Worker(None, events)
+        worker.start()
+        workers.append(worker)
+        return worker, events
+
+    yield make
+    for worker in workers:
+        worker.shutdown()
+
+
+def test_a_worker_without_a_connection_does_nothing_until_it_is_told_to_connect(idle_worker):
+    worker, events = idle_worker()
+    simulator = HookedSimulator()
+
+    worker.connect(lambda: simulator)
+
+    assert isinstance(next_event(events), Connected)  # the first event there is: nothing came before it
+
+
+def test_requests_for_a_connection_that_is_not_there_are_dropped_not_kept_for_the_next_one(idle_worker):
+    worker, events = idle_worker()
+    simulator = HookedSimulator()
+
+    worker.apply_setup(Setup.default(Function.FREQUENCY))
+    worker.start_continuous()
+    worker.connect(lambda: simulator)
+
+    assert isinstance(next_event(events), Connected)
+    settled(worker, events)
+    assert simulator.reads == 0
+    assert not [command for command in simulator.writes if not command.endswith("?")]
+
+
+def test_disconnecting_returns_the_meter_to_local_and_the_same_worker_can_connect_again(idle_worker):
+    worker, events = idle_worker()
+    first, second = HookedSimulator(), HookedSimulator()
+    worker.connect(lambda: first)
+    assert isinstance(next_event(events), Connected)
+
+    worker.disconnect()
+
+    assert isinstance(next_event(events), Disconnected)
+    assert not remote(first)
+    assert first.closed
+    assert worker.is_alive()
+    worker.connect(lambda: second)
+    assert isinstance(next_event(events), Connected)
+    assert remote(second)
+
+
+def test_connecting_while_connected_finishes_with_the_first_meter_before_opening_the_second(idle_worker):
+    worker, events = idle_worker()
+    first, second = HookedSimulator(), HookedSimulator()
+    worker.connect(lambda: first)
+    assert isinstance(next_event(events), Connected)
+
+    worker.connect(lambda: second)
+
+    assert isinstance(next_event(events), Disconnected)
+    assert first.closed
+    assert not remote(first)
+    assert isinstance(next_event(events), Connected)
+    assert not second.closed
+
+
+def test_a_worker_can_connect_again_after_a_connection_failed_or_was_lost(idle_worker):
+    def refuse() -> Simulator:
+        message = "no such resource"
+        raise TransportError(message)
+
+    worker, events = idle_worker()
+    worker.connect(refuse)
+    assert next_event(events) == ConnectionFailed("no such resource")
+    assert isinstance(next_event(events), Disconnected)
+
+    dropping = HookedSimulator()
+    worker.connect(lambda: dropping)
+    next_event(events)
+    dropping.close()
+    worker.start_continuous()
+    seen = collect_until(events, lambda event: isinstance(event, Disconnected))
+    assert isinstance(seen[0], ConnectionLost)
+
+    good = HookedSimulator()
+    worker.connect(lambda: good)
+    assert isinstance(next_event(events), Connected)
+
+
+def test_a_worker_that_failed_unexpectedly_still_serves_the_next_connection(idle_worker):
+    worker, events = idle_worker()
+    exploding = HookedSimulator()
+
+    def explode(_count):
+        message = "boom"
+        raise RuntimeError(message)
+
+    exploding.before_reading = explode
+    worker.connect(lambda: exploding)
+    next_event(events)
+    worker.start_continuous()
+    seen = collect_until(events, lambda event: isinstance(event, Disconnected))
+    assert isinstance(seen[0], WorkerFailed)
+
+    worker.connect(HookedSimulator)
+    assert isinstance(next_event(events), Connected)
+
+
+def test_shutdown_ends_the_thread_even_when_it_is_idle_between_connections(idle_worker):
+    worker, events = idle_worker()
+    worker.connect(HookedSimulator)
+    next_event(events)
+    worker.disconnect()
+    assert isinstance(next_event(events), Disconnected)
+
+    assert worker.shutdown() is True
+    assert worker.is_alive() is False
+
+
 def test_shutdown_is_harmless_when_repeated(started):
     worker, events = started(HookedSimulator())
     next_event(events)
@@ -236,7 +413,7 @@ def test_shutdown_before_start_does_not_poison_a_later_start():
     assert worker.shutdown() is True
 
 
-def test_a_device_that_is_not_a_34401a_fails_the_connection_and_is_closed(started):
+def test_something_that_is_not_a_34401a_fails_the_connection_and_is_closed(started):
     simulator = HookedSimulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01")
     _worker, events = started(simulator)
 
@@ -331,7 +508,7 @@ def test_an_unexpected_error_while_reading_ends_the_worker_loudly(started, caplo
     assert worker.shutdown() is True
 
 
-def test_a_transport_failure_while_reading_ends_the_worker_loudly(started):
+def test_a_dropped_connection_while_reading_is_reported_as_lost_and_the_worker_ends(started):
     simulator = HookedSimulator()
     worker, events = started(simulator)
     next_event(events)
@@ -340,7 +517,83 @@ def test_a_transport_failure_while_reading_ends_the_worker_loudly(started):
     worker.start_continuous()
     seen = collect_until(events, lambda event: isinstance(event, Disconnected))
 
-    assert isinstance(seen[0], WorkerFailed)
+    assert isinstance(seen[0], ConnectionLost)
+    assert "closed" in seen[0].message
+    assert worker.shutdown() is True
+
+
+def test_shutdown_returns_the_meter_to_local_and_leaves_its_setup_alone(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    worker.apply_setup(Setup.default(Function.RESISTANCE_2W))
+    collect_until(events, lambda event: isinstance(event, SetupChanged))
+    assert remote(simulator)
+
+    assert worker.shutdown() is True
+
+    assert not remote(simulator)
+    assert simulator.closed is True
+    assert simulator.go_to_local_calls == 1
+    assert not any(command.startswith("*RST") for command in simulator.writes)
+
+
+def test_a_failed_connection_to_a_device_that_answers_still_returns_it_to_local(started):
+    simulator = HookedSimulator(identity="Rigol Technologies,DM3058,DM3O123456789,01.01")
+    _worker, events = started(simulator)
+
+    collect_until(events, lambda event: isinstance(event, Disconnected))
+
+    assert not remote(simulator)
+
+
+def test_a_transport_that_cannot_go_to_local_is_still_closed(started):
+    class NoLocal(HookedSimulator):
+        def go_to_local(self) -> None:
+            message = "the bus is gone"
+            raise TransportError(message)
+
+    simulator = NoLocal()
+    worker, events = started(simulator)
+    next_event(events)
+
+    assert worker.shutdown() is True
+
+    assert simulator.closed is True
+    assert isinstance(next_event(events), Disconnected)
+
+
+def test_a_transport_without_local_control_is_simply_closed(started):
+    class Plain:
+        """Just a Transport: a Simulator with no go_to_local."""
+
+        def __init__(self) -> None:
+            self._inner = Simulator()
+            self.closed = False
+            self.timeout = 2.0
+
+        def write(self, command: str) -> None:
+            self._inner.write(command)
+
+        def read(self) -> str:
+            return self._inner.read()
+
+        def query(self, command: str) -> str:
+            return self._inner.query(command)
+
+        def clear(self) -> None:
+            self._inner.clear()
+
+        def close(self) -> None:
+            self.closed = True
+
+    plain = Plain()
+    worker, events = started(plain)
+    next_event(events)
+
+    assert worker.shutdown() is True
+
+    assert plain.closed is True
 
 
 def test_connecting_reads_the_setup_back_without_changing_the_meter(started):
@@ -443,8 +696,7 @@ def test_a_setup_change_that_succeeds_reports_no_errors(started):
     worker.apply_setup(Setup.default(Function.DIODE))
 
     assert isinstance(next_event(events), SetupChanged)
-    time.sleep(0.05)
-    assert events.empty()
+    settled(worker, events)
 
 
 def test_a_setup_change_the_worker_cannot_confirm_is_reported_and_the_worker_carries_on(started):
@@ -483,3 +735,161 @@ def test_selecting_a_function_keeps_its_own_settings_and_reports_the_setup(start
     assert reading.reading.function is Function.RESISTANCE_2W
     assert reading.setup == expected
     assert [command for command in simulator.writes if not command.endswith("?")] == ['FUNC "RES"']
+
+
+def test_a_raw_query_is_answered_with_the_reply_and_changes_no_setup(started):
+    worker, events = started(HookedSimulator(identity=AGILENT_IDENTITY))
+    next_event(events)
+
+    worker.send_raw("*IDN?")
+
+    assert next_event(events) == RawReplied("*IDN?", AGILENT_IDENTITY, ())
+    settled(worker, events)
+
+
+def test_a_raw_write_is_followed_by_the_setup_the_meter_is_now_in(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw('FUNC "RES"')
+
+    assert next_event(events) == RawReplied('FUNC "RES"', None, ())
+    changed = next_event(events)
+    assert changed == SetupChanged(Setup.default(Function.RESISTANCE_2W))
+    worker.start_continuous()
+    assert next_reading(events).reading.function is Function.RESISTANCE_2W
+
+
+def test_a_raw_write_the_meter_complains_about_reports_its_errors(started):
+    worker, events = started(HookedSimulator())
+    next_event(events)
+
+    worker.send_raw("NOTACOMMAND")
+
+    replied = next_event(events)
+    assert isinstance(replied, RawReplied)
+    assert [queued.code for queued in replied.errors] == [-113]
+    # Every Meter error is also reported as such, which is what the error log and the status bar listen to.
+    assert collect_until(events, lambda event: isinstance(event, ErrorsReported))[-1] == ErrorsReported(replied.errors)
+
+
+def test_raw_commands_are_served_between_readings_while_continuous_runs(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    worker.start_continuous()
+    next_reading(events)
+
+    worker.send_raw("VOLT:DC:NPLC 10")
+
+    after = collect_until(events, lambda event: isinstance(event, SetupChanged))
+    assert any(isinstance(event, RawReplied) for event in after)
+    assert next_reading(events).setup.nplc == 10
+    # The Transport was only ever used by the worker: the Reading in progress was never cut in two.
+    assert "VOLT:DC:NPLC 10" in simulator.writes
+
+
+def test_a_raw_query_that_times_out_is_reported_and_the_worker_carries_on(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("NOTAQUERY?")
+
+    failed = next_event(events)
+    assert isinstance(failed, RawFailed)
+    assert failed.command == "NOTAQUERY?"
+    assert [queued.code for queued in failed.errors] == [-113]
+    assert next_event(events) == ErrorsReported(failed.errors)
+    assert simulator.clears == 1
+    worker.send_raw("*IDN?")
+    assert isinstance(next_event(events), RawReplied)
+    assert worker.is_alive()
+
+
+def test_a_raw_calibration_write_is_refused_and_never_reaches_the_meter(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("CAL:SEC:STAT OFF,HP034401")
+
+    refused = next_event(events)
+    assert isinstance(refused, RawRefused)
+    assert refused.command == "CAL:SEC:STAT OFF,HP034401"
+    assert "calibration" in refused.message
+    worker.send_raw("*IDN?")
+    next_event(events)
+    assert not any(command.upper().startswith("CAL:") for command in simulator.writes)
+
+
+def test_a_raw_calibration_write_goes_through_when_it_is_explicitly_allowed(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("CAL:STR 'x'", allow_calibration=True)
+
+    assert isinstance(next_event(events), RawReplied)
+    assert "CAL:STR 'x'" in simulator.writes
+
+
+def test_a_read_only_calibration_query_needs_no_override(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+
+    worker.send_raw("CAL:COUN?")
+
+    replied = next_event(events)
+    assert isinstance(replied, RawReplied)
+    assert replied.reply == "+1"
+    assert "CAL:COUN?" in simulator.writes
+
+
+def test_an_empty_raw_command_is_reported_not_sent(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    written = len(simulator.writes)
+
+    worker.send_raw("   ")
+
+    failed = next_event(events)
+    assert isinstance(failed, RawFailed)
+    assert "Nothing to send" in failed.message
+    assert len(simulator.writes) == written
+
+
+def test_a_fixed_trigger_delay_is_part_of_what_a_reading_may_take_so_readings_do_not_time_out(started):
+    simulator = HookedSimulator(time_scale=1, sleep=lambda _seconds: None)
+    worker, events = started(simulator)
+    next_event(events)
+    delayed = Setup.default(Function.DC_VOLTAGE).with_trigger(TriggerSettings(delay=4.0))
+
+    worker.apply_setup(delayed)
+    worker.start_continuous()
+
+    assert next_event(events) == SetupChanged(delayed)
+    assert simulator.timeout > 4.0
+    assert isinstance(next_event(events), ReadingTaken)
+
+
+def test_a_reading_that_puts_the_trigger_settings_back_to_one_immediate_reading_says_so(started):
+    simulator = HookedSimulator()
+    worker, events = started(simulator)
+    next_event(events)
+    several = Setup.default(Function.DC_VOLTAGE).with_trigger(TriggerSettings(TriggerSource.BUS, sample_count=10))
+    worker.apply_setup(several)
+    assert next_event(events) == SetupChanged(several)
+
+    worker.single()
+
+    changed = next_event(events)
+    assert isinstance(changed, SetupChanged)
+    assert changed.setup.trigger == TriggerSettings()
+    reading = next_reading(events)
+    assert reading.setup.trigger == TriggerSettings()
+    worker.single()
+    assert next_reading(events).reading.function is Function.DC_VOLTAGE  # nothing more to report the second time

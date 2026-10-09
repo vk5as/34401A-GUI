@@ -1,3 +1,7 @@
+import argparse
+import sys
+from collections.abc import Callable
+
 import pytest
 
 from agilent34401a import __version__, cli
@@ -8,6 +12,7 @@ from agilent34401a.driver import Driver, QueuedError
 from agilent34401a.errors import BackendUnavailableError, MeterError, TransportTimeoutError, UnrecognisedIdentityError
 from agilent34401a.meter import Function, Setup, reading_timeout
 from agilent34401a.sim import Simulator
+from agilent34401a.transport import Transport
 
 
 def test_version_flag_prints_the_version_and_exits_successfully(capsys):
@@ -306,3 +311,58 @@ def test_read_reports_a_meter_that_does_not_answer_and_exits_non_zero(monkeypatc
     assert main(["read"]) == 1
 
     assert "Timed out waiting for the Meter" in capsys.readouterr().err
+
+
+def _parse_with_new_subcommand(action: Callable[[Driver, Transport], int], argv: list[str]) -> int:
+    """Build a parser with one extra subcommand, the way each feature adds its own."""
+    parser = argparse.ArgumentParser(prog="agilent34401a-cli")
+    subparsers = parser.add_subparsers(dest="command")
+    sub = cli.add_command(subparsers, "demo", lambda args: cli.run_on_meter(args, action), summary="demo")
+    cli.add_connection_options(sub)
+    args = parser.parse_args(argv)
+    return int(args.handler(args))
+
+
+def test_a_new_subcommand_gets_a_connected_identified_driver_and_its_exit_code(capsys):
+    def action(driver, transport):
+        sys.stdout.write(f"{driver.setup.function.label} {transport.timeout}\n")
+        return 7
+
+    assert _parse_with_new_subcommand(action, ["demo", "--simulate"]) == 7
+
+    assert capsys.readouterr().out.startswith("DC V ")
+
+
+def test_a_new_subcommand_reports_a_meter_error_on_stderr_and_exits_1(capsys):
+    def action(_driver, _transport):
+        message = "the Meter said no"
+        raise MeterError(message)
+
+    assert _parse_with_new_subcommand(action, ["demo", "--simulate"]) == 1
+
+    assert "agilent34401a-cli: error: the Meter said no" in capsys.readouterr().err
+
+
+def test_a_new_subcommand_always_closes_the_transport(monkeypatch):
+    closed = []
+    monkeypatch.setattr(Simulator, "close", lambda _self: closed.append(True))
+
+    _parse_with_new_subcommand(lambda _driver, _transport: 0, ["demo", "--simulate"])
+
+    assert closed == [True]
+
+
+def test_a_new_subcommand_shares_the_connection_options(monkeypatch):
+    opened = _opened(monkeypatch)
+
+    _parse_with_new_subcommand(lambda _driver, _transport: 0, ["demo", "--backend", "py", "--gpib-address", "9"])
+
+    assert opened[0].backend is Backend.PYVISA_PY
+    assert opened[0].gpib_address == 9
+
+
+def test_a_new_subcommand_refuses_contradictory_connection_options():
+    with pytest.raises(SystemExit) as exit_info:
+        _parse_with_new_subcommand(lambda _driver, _transport: 0, ["demo", "--simulate", "--backend", "py"])
+
+    assert exit_info.value.code == 2

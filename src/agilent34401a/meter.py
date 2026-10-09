@@ -1,10 +1,12 @@
 """The Meter model: Functions, Setups, Readings, and turning replies into Readings and Readings into text."""
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from agilent34401a.errors import InvalidSetupError, MalformedReplyError
+from agilent34401a.math_operations import LimitResult, MathOperation, MathSettings
+from agilent34401a.trigger import TriggerSettings
 
 # Engineering prefixes by power of ten, smallest to largest.
 _PREFIXES = {-12: "p", -9: "n", -6: "µ", -3: "m", 0: "", 3: "k", 6: "M", 9: "G"}
@@ -12,8 +14,9 @@ _MIN_PREFIX_EXPONENT = min(_PREFIXES)
 _MAX_PREFIX_EXPONENT = max(_PREFIXES)
 _PREFIX_STEP = 3
 
-# The Meter reports Overload as +/-9.9E+37; anything at or beyond this magnitude is an Overload.
-_OVERLOAD_MAGNITUDE = 9.9e37
+# The Meter reports Overload as +/-9.9E+37; anything at or beyond this magnitude is an Overload. It also says an
+# infinite Trigger Count that way.
+OVERLOAD_MAGNITUDE = 9.9e37
 
 _LINE_FREQUENCY_HZ = 50
 _AUTOZERO_FACTOR = 2  # with Autozero on, every Reading is an offset measurement plus the signal measurement
@@ -35,6 +38,94 @@ class Resolution(Enum):
         return f"{int(self.value)}½ digits"
 
 
+class GateTime(Enum):
+    """How long a frequency or period measurement counts for. It decides the Resolution of those Functions."""
+
+    TEN_MILLISECONDS = 0.01
+    HUNDRED_MILLISECONDS = 0.1
+    ONE_SECOND = 1.0
+
+    @property
+    def seconds(self) -> float:
+        return self.value
+
+    @property
+    def label(self) -> str:
+        return "1 s" if self is GateTime.ONE_SECOND else f"{round(self.value * 1000)} ms"
+
+    @property
+    def resolution(self) -> Resolution:
+        return _RESOLUTION_FOR_GATE_TIME[self]
+
+
+_RESOLUTION_FOR_GATE_TIME = {
+    GateTime.TEN_MILLISECONDS: Resolution.FOUR_HALF,
+    GateTime.HUNDRED_MILLISECONDS: Resolution.FIVE_HALF,
+    GateTime.ONE_SECOND: Resolution.SIX_HALF,
+}
+_GATE_TIME_FOR_RESOLUTION = {resolution: gate_time for gate_time, resolution in _RESOLUTION_FOR_GATE_TIME.items()}
+
+
+class AcFilter(Enum):
+    """The lowest signal frequency the AC detector is tuned for. The lower it is, the longer a Reading settles."""
+
+    SLOW = 3
+    MEDIUM = 20
+    FAST = 200
+
+    @property
+    def hertz(self) -> int:
+        return self.value
+
+    @property
+    def label(self) -> str:
+        return f"{self.value} Hz"
+
+    @property
+    def settling_seconds(self) -> float:
+        return _AC_SETTLING_S[self]
+
+
+_AC_SETTLING_S = {AcFilter.SLOW: 7.0, AcFilter.MEDIUM: 1.0, AcFilter.FAST: 0.1}
+
+
+class Autozero(Enum):
+    """Whether the Meter takes an offset measurement alongside each Reading.
+
+    `ONCE` takes a single offset measurement and then leaves Autozero off, so the Meter never reports it back.
+    """
+
+    ON = "ON"
+    OFF = "OFF"
+    ONCE = "ONCE"
+
+    @property
+    def label(self) -> str:
+        return self.value.capitalize()
+
+
+class InputImpedance(Enum):
+    """What DC voltage inputs on the lower Ranges present to the circuit."""
+
+    TEN_MEGOHM = "10 MΩ"
+    HIGH_IMPEDANCE = ">10 GΩ"
+
+    @property
+    def label(self) -> str:
+        return self.value
+
+
+class Terminals(Enum):
+    """Which set of input jacks is active. The Meter's front panel switch decides; it can only be read."""
+
+    FRONT = "FRON"
+    REAR = "REAR"
+
+    @property
+    def label(self) -> str:
+        return "Front" if self is Terminals.FRONT else "Rear"
+
+
 NPLC_VALUES = (0.02, 0.2, 1, 10, 100)
 """The Integration Times, in power-line cycles, that the Meter accepts."""
 
@@ -48,9 +139,8 @@ _RESOLUTION_FOR_NPLC = {
 # The Integration Time the Meter settles on when only a Resolution is asked for.
 _NPLC_FOR_RESOLUTION = {Resolution.FOUR_HALF: 0.02, Resolution.FIVE_HALF: 1, Resolution.SIX_HALF: 10}
 _DEFAULT_NPLC = 10
-# How long a frequency or period measurement counts for, by Resolution.
-_GATE_TIME_S = {Resolution.FOUR_HALF: 0.01, Resolution.FIVE_HALF: 0.1, Resolution.SIX_HALF: 1.0}
-_AC_READING_S = 1.0  # the 20 Hz AC Filter, the Meter's default, needs about a second to settle
+_DEFAULT_AC_FILTER = AcFilter.MEDIUM
+_DEFAULT_GATE_TIME = GateTime.HUNDRED_MILLISECONDS
 _FIXED_FUNCTION_READING_S = 0.05
 
 _DC_VOLTAGE_RANGES = (0.1, 1.0, 10.0, 100.0, 1000.0)
@@ -67,6 +157,9 @@ class _FunctionSpec:
     has_integration_time: bool = False
     fixed_resolution: Resolution | None = None
     uses_prefixes: bool = True
+    has_ac_filter: bool = False
+    has_gate_time: bool = False
+    has_input_impedance: bool = False
 
 
 class Function(Enum):
@@ -119,19 +212,50 @@ class Function(Enum):
     def uses_prefixes(self) -> bool:
         return self._spec.uses_prefixes
 
+    @property
+    def has_ac_filter(self) -> bool:
+        return self._spec.has_ac_filter
 
-# Frequency and period are fixed at 5½ digits until Gate Time can be chosen.
+    @property
+    def has_gate_time(self) -> bool:
+        """Frequency and period count over a Gate Time, which decides their Resolution."""
+        return self._spec.has_gate_time
+
+    @property
+    def has_autozero(self) -> bool:
+        """Autozero applies to the Functions that integrate."""
+        return self._spec.has_integration_time
+
+    @property
+    def has_input_impedance(self) -> bool:
+        return self._spec.has_input_impedance
+
+    @property
+    def has_math(self) -> bool:
+        """Math Operations apply to every Function but the continuity and diode tests."""
+        return self not in (Function.CONTINUITY, Function.DIODE)
+
+    @property
+    def has_decibels(self) -> bool:
+        """The dB and dBm Operations are voltage maths, so they apply to DC voltage and AC voltage only."""
+        return self in (Function.DC_VOLTAGE, Function.AC_VOLTAGE)
+
+
 _SPECS = {
-    Function.DC_VOLTAGE: _FunctionSpec("DC V", "V", _DC_VOLTAGE_RANGES, "V", has_integration_time=True),
-    Function.AC_VOLTAGE: _FunctionSpec("AC V", "V", _AC_VOLTAGE_RANGES, "V", fixed_resolution=Resolution.SIX_HALF),
+    Function.DC_VOLTAGE: _FunctionSpec(
+        "DC V", "V", _DC_VOLTAGE_RANGES, "V", has_integration_time=True, has_input_impedance=True
+    ),
+    Function.AC_VOLTAGE: _FunctionSpec(
+        "AC V", "V", _AC_VOLTAGE_RANGES, "V", fixed_resolution=Resolution.SIX_HALF, has_ac_filter=True
+    ),
     Function.DC_CURRENT: _FunctionSpec("DC I", "A", (0.01, 0.1, 1.0, 3.0), "A", has_integration_time=True),
-    Function.AC_CURRENT: _FunctionSpec("AC I", "A", (1.0, 3.0), "A", fixed_resolution=Resolution.SIX_HALF),
+    Function.AC_CURRENT: _FunctionSpec(
+        "AC I", "A", (1.0, 3.0), "A", fixed_resolution=Resolution.SIX_HALF, has_ac_filter=True
+    ),
     Function.RESISTANCE_2W: _FunctionSpec("2-wire Ω", "Ω", _RESISTANCE_RANGES, "Ω", has_integration_time=True),
     Function.RESISTANCE_4W: _FunctionSpec("4-wire Ω", "Ω", _RESISTANCE_RANGES, "Ω", has_integration_time=True),
-    Function.FREQUENCY: _FunctionSpec(
-        "Frequency", "Hz", _AC_VOLTAGE_RANGES, "V", fixed_resolution=Resolution.FIVE_HALF
-    ),
-    Function.PERIOD: _FunctionSpec("Period", "s", _AC_VOLTAGE_RANGES, "V", fixed_resolution=Resolution.FIVE_HALF),
+    Function.FREQUENCY: _FunctionSpec("Frequency", "Hz", _AC_VOLTAGE_RANGES, "V", has_gate_time=True),
+    Function.PERIOD: _FunctionSpec("Period", "s", _AC_VOLTAGE_RANGES, "V", has_gate_time=True),
     Function.CONTINUITY: _FunctionSpec("Continuity", "Ω", (), "Ω", fixed_resolution=Resolution.FIVE_HALF),
     Function.DIODE: _FunctionSpec("Diode", "V", (), "V", fixed_resolution=Resolution.FIVE_HALF),
     Function.DC_VOLTAGE_RATIO: _FunctionSpec(
@@ -145,13 +269,22 @@ class Setup:
     """The settings that decide what a Reading means. Invalid combinations cannot be built.
 
     `range` is None for Autorange. `nplc` is the Integration Time for the Functions that have one, and the
-    Resolution always agrees with it.
+    Resolution always agrees with it. The same goes for `gate_time` of frequency and period. Each sense option is
+    None for the Functions it does not apply to and set for the ones it does: `ac_filter` for AC Functions,
+    `gate_time` for frequency and period, `autozero` for the Functions that integrate, and `input_impedance` for DC
+    voltage. `math` holds the Math Operation in effect, if any, and the settings of them all.
     """
 
     function: Function
     range: float | None
     resolution: Resolution
     nplc: float | None
+    ac_filter: AcFilter | None = None
+    gate_time: GateTime | None = None
+    autozero: Autozero | None = None
+    input_impedance: InputImpedance | None = None
+    trigger: TriggerSettings = field(default_factory=TriggerSettings)
+    math: MathSettings = field(default_factory=MathSettings)
 
     def __post_init__(self) -> None:
         function = self.function
@@ -166,17 +299,60 @@ class Setup:
         elif self.nplc is not None:
             message = f"{function.label} has no Integration Time"
             raise InvalidSetupError(message)
-        expected = function.fixed_resolution or (None if self.nplc is None else _RESOLUTION_FOR_NPLC[self.nplc])
+        self._require_sense_options()
+        self._require_math_to_apply()
+        expected = function.fixed_resolution
+        if expected is None:
+            expected = self.gate_time.resolution if self.gate_time else _RESOLUTION_FOR_NPLC.get(self.nplc or 0)
         if self.resolution is not expected:
             message = f"Resolution of {function.label} is {expected and expected.label}, not {self.resolution.label}"
+            raise InvalidSetupError(message)
+
+    def _require_sense_options(self) -> None:
+        function = self.function
+        options = (
+            ("AC Filter", function.has_ac_filter, self.ac_filter),
+            ("Gate Time", function.has_gate_time, self.gate_time),
+            ("Autozero", function.has_autozero, self.autozero),
+            ("Input Impedance", function.has_input_impedance, self.input_impedance),
+        )
+        for name, applies, value in options:
+            if applies and value is None:
+                message = f"{function.label} needs its {name}"
+                raise InvalidSetupError(message)
+            if not applies and value is not None:
+                message = f"{function.label} has no {name}"
+                raise InvalidSetupError(message)
+
+    def _require_math_to_apply(self) -> None:
+        function, operation = self.function, self.math.operation
+        if operation is None:
+            return
+        if not function.has_math:
+            message = f"{function.label} has no Math Operation, not {operation.label}"
+            raise InvalidSetupError(message)
+        if operation.in_decibels and not function.has_decibels:
+            message = f"{operation.label} applies to DC V and AC V, not {function.label}"
             raise InvalidSetupError(message)
 
     @classmethod
     def default(cls, function: Function) -> "Setup":
         """Return the Setup the Meter has for `function` after a reset: Autorange, and 10 NPLC where that applies."""
+        gate_time = _DEFAULT_GATE_TIME if function.has_gate_time else None
         if function.has_integration_time:
-            return cls(function, None, _RESOLUTION_FOR_NPLC[_DEFAULT_NPLC], _DEFAULT_NPLC)
-        return cls(function, None, function.fixed_resolution or Resolution.SIX_HALF, None)
+            resolution = _RESOLUTION_FOR_NPLC[_DEFAULT_NPLC]
+        else:
+            resolution = gate_time.resolution if gate_time else function.fixed_resolution or Resolution.SIX_HALF
+        return cls(
+            function,
+            None,
+            resolution,
+            _DEFAULT_NPLC if function.has_integration_time else None,
+            ac_filter=_DEFAULT_AC_FILTER if function.has_ac_filter else None,
+            gate_time=gate_time,
+            autozero=Autozero.ON if function.has_autozero else None,
+            input_impedance=InputImpedance.TEN_MEGOHM if function.has_input_impedance else None,
+        )
 
     def with_range(self, range_value: float | None) -> "Setup":
         return replace(self, range=range_value)
@@ -185,11 +361,33 @@ class Setup:
         """Choose a Resolution, which also sets the Integration Time that usually goes with it."""
         if self.function.has_integration_time:
             return replace(self, resolution=resolution, nplc=_NPLC_FOR_RESOLUTION[resolution])
+        if self.function.has_gate_time:
+            return replace(self, resolution=resolution, gate_time=_GATE_TIME_FOR_RESOLUTION[resolution])
         return replace(self, resolution=resolution)
 
     def with_nplc(self, nplc: float) -> "Setup":
         """Choose an Integration Time, which also decides the Resolution."""
         return replace(self, nplc=nplc, resolution=_RESOLUTION_FOR_NPLC.get(nplc, self.resolution))
+
+    def with_gate_time(self, gate_time: GateTime) -> "Setup":
+        """Choose a Gate Time, which also decides the Resolution."""
+        return replace(self, gate_time=gate_time, resolution=gate_time.resolution)
+
+    def with_ac_filter(self, ac_filter: AcFilter) -> "Setup":
+        return replace(self, ac_filter=ac_filter)
+
+    def with_autozero(self, autozero: Autozero) -> "Setup":
+        return replace(self, autozero=autozero)
+
+    def with_input_impedance(self, input_impedance: InputImpedance) -> "Setup":
+        return replace(self, input_impedance=input_impedance)
+
+    def with_trigger(self, trigger: TriggerSettings) -> "Setup":
+        return replace(self, trigger=trigger)
+
+    def with_math(self, math_settings: MathSettings) -> "Setup":
+        """Choose the Math Operation in effect and the settings of them all. Only one Operation is active."""
+        return replace(self, math=math_settings)
 
 
 def describe_setup(setup: Setup) -> str:
@@ -200,20 +398,52 @@ def describe_setup(setup: Setup) -> str:
     parts.append(setup.resolution.label)
     if setup.nplc is not None:
         parts.append(f"{setup.nplc:g} NPLC")
+    if setup.ac_filter is not None:
+        parts.append(f"{setup.ac_filter.label} filter")
+    if setup.gate_time is not None:
+        parts.append(f"{setup.gate_time.label} gate")
+    # The options a reset Meter has are left out; only a departure from them is worth the room.
+    if setup.autozero not in (None, Autozero.ON):
+        parts.append(f"Autozero {setup.autozero.label.lower()}")
+    if setup.input_impedance not in (None, InputImpedance.TEN_MEGOHM):
+        parts.append(f"{setup.input_impedance.label} input")
+    if setup.math.operation is not None:
+        parts.append(describe_math(setup))
     return " · ".join(parts)
 
 
+def describe_math(setup: Setup) -> str:
+    """Say which Math Operation is in effect and what it uses: "Null 500 mV", "dBm into 600 Ω", "Limit Test -1 V to 2 V"."""
+    settings, unit = setup.math, setup.function.unit
+    match settings.operation:
+        case MathOperation.NULL:
+            return f"Null {_engineering(settings.null_offset, unit)}"
+        case MathOperation.DB:
+            return f"dB relative to {settings.db_reference:g} dBm"
+        case MathOperation.DBM:
+            return f"dBm into {settings.dbm_reference_resistance:g} Ω"
+        case MathOperation.LIMIT_TEST:
+            lower, upper = (_engineering(bound, unit) for bound in (settings.limit_lower, settings.limit_upper))
+            return f"Limit Test {lower} to {upper}"
+        case MathOperation.STATISTICS:
+            return MathOperation.STATISTICS.label
+        case None:
+            return ""
+
+
 def measurement_time(setup: Setup) -> float:
-    """Seconds the Meter needs for one Reading in this Setup, with Autozero on and the Range already settled."""
+    """Seconds the Meter needs for one Reading in this Setup, with the Range already settled."""
     function = setup.function
     if function.has_integration_time:
-        seconds = (setup.nplc or _DEFAULT_NPLC) / _LINE_FREQUENCY_HZ * _AUTOZERO_FACTOR
+        seconds = (setup.nplc or _DEFAULT_NPLC) / _LINE_FREQUENCY_HZ
+        if setup.autozero is Autozero.ON:
+            seconds *= _AUTOZERO_FACTOR
         # A ratio measures the sense input and the reference input.
         return seconds * 2 if function is Function.DC_VOLTAGE_RATIO else seconds
-    if function in (Function.AC_VOLTAGE, Function.AC_CURRENT):
-        return _AC_READING_S
-    if function in (Function.FREQUENCY, Function.PERIOD):
-        return _GATE_TIME_S[setup.resolution]
+    if setup.ac_filter is not None:
+        return setup.ac_filter.settling_seconds
+    if setup.gate_time is not None:
+        return setup.gate_time.seconds
     return _FIXED_FUNCTION_READING_S
 
 
@@ -224,9 +454,13 @@ _AUTORANGE_STEPS = 5  # Autorange may measure at several Ranges before it settle
 
 
 def reading_timeout(setup: Setup) -> float:
-    """Seconds to wait for a Reading in this Setup before giving up (ADR-0002)."""
+    """Seconds to wait for a Reading in this Setup before giving up (ADR-0002).
+
+    A fixed Trigger Delay is waited out before every Reading (Single and Continuous keep it), so it counts in full.
+    """
     steps = _AUTORANGE_STEPS if setup.range is None and setup.function.ranges else 1
-    return max(_MIN_TIMEOUT_S, measurement_time(setup) * steps * _TIMEOUT_MARGIN + _TIMEOUT_EXTRA_S)
+    delay = setup.trigger.delay or 0.0
+    return max(_MIN_TIMEOUT_S, (delay + measurement_time(setup) * steps) * _TIMEOUT_MARGIN + _TIMEOUT_EXTRA_S)
 
 
 @dataclass(frozen=True)
@@ -236,10 +470,23 @@ class Reading:
     value: float
     function: Function
     raw: str
+    math: MathOperation | None = None
+    """The Math Operation in effect when it was taken; for Null, dB and dBm `value` is the Operation's result."""
+    limit: LimitResult | None = None
+    """How it did in a Limit Test, or None when no Limit Test was running."""
+
+    @property
+    def unit(self) -> str:
+        """The unit of `value`: the Function's, or dB or dBm when the Meter was doing that maths."""
+        return self.math.label if self.math is not None and self.math.in_decibels else self.function.unit
+
+    @property
+    def uses_prefixes(self) -> bool:
+        return self.function.uses_prefixes and not (self.math is not None and self.math.in_decibels)
 
     @property
     def is_overload(self) -> bool:
-        return abs(self.value) >= _OVERLOAD_MAGNITUDE
+        return abs(self.value) >= OVERLOAD_MAGNITUDE
 
 
 def parse_reading(raw: str, function: Function) -> Reading:
@@ -264,22 +511,27 @@ def format_reading(reading: Reading, resolution: Resolution = Resolution.SIX_HAL
         return "OVLD"
     significant = resolution.significant_digits
     value = reading.value + 0.0  # -0.0 would otherwise print as "-0.000000"
-    if not reading.function.uses_prefixes:
-        return _scaled_text(value, 0, significant)
+    if not reading.uses_prefixes:
+        text = _scaled_text(value, 0, significant)
+        return f"{text} {reading.unit}" if reading.unit and reading.math is not None else text
     prefix_exponent = _prefix_exponent(value)
     text = _scaled_text(value, prefix_exponent, significant)
     if abs(float(text)) >= 10**_PREFIX_STEP and prefix_exponent < _MAX_PREFIX_EXPONENT:
         # Rounding carried into the next power of a thousand (999.99999 mV -> 1.000000 V).
         prefix_exponent += _PREFIX_STEP
         text = _scaled_text(value, prefix_exponent, significant)
-    return f"{text} {_PREFIXES[prefix_exponent]}{reading.function.unit}"
+    return f"{text} {_PREFIXES[prefix_exponent]}{reading.unit}"
 
 
 def format_range(function: Function, value: float) -> str:
     """Name a Range the way the Meter's front panel does: 100 mV, 10 kΩ, 3 A."""
+    return _engineering(value, function.range_unit)
+
+
+def _engineering(value: float, unit: str) -> str:
     prefix_exponent = _prefix_exponent(value)
     scaled = round(value / 10**prefix_exponent, 9)
-    return f"{scaled:g} {_PREFIXES[prefix_exponent]}{function.range_unit}"
+    return f"{scaled:g} {_PREFIXES[prefix_exponent]}{unit}".strip()
 
 
 def _prefix_exponent(value: float) -> int:

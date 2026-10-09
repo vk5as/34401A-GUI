@@ -47,8 +47,12 @@ Which set of input jacks is active (front or rear), selected by the physical swi
 The complete set of Meter settings (Function, Range, Resolution, Integration Time, trigger and Math settings) that determines what a Reading means.
 _Avoid_: Config, state, configuration
 
+**Meter Memory**:
+The Meter's own non-volatile storage for a Setup. It can be written and read back only through the remote interface (`*SAV` and `*RCL`); the front panel cannot store or recall. It holds a few numbered, unnamed Setups, so it complements Presets rather than replacing them.
+_Avoid_: Preset (a Preset lives in the application), state memory
+
 **Preset**:
-A named Setup saved by the application, which can be re-applied to the Meter in one step. The Meter has no setup memory of its own, so Presets exist only in the application.
+A named Setup saved by the application, which can be re-applied to the Meter in one step. Presets live on the computer, in `presets.json` beside the settings, so there can be as many as you like, each with a name, and they can be exported to and imported from files. The Meter's own storage (Meter Memory) holds only a few unnamed Setups. A Preset holds the Setup the Meter reported, so it never holds Autozero Once. Applying one reports every setting the Meter did not take.
 _Avoid_: Profile, saved state
 
 ### Readings
@@ -74,6 +78,10 @@ _Avoid_: Buffer, log
 
 **Break Marker**:
 A point in the History where the Function or unit changed, so Readings on either side are not comparable.
+
+**Recording**:
+Writing each Reading to a CSV file as it arrives, until stopped. It keeps going across Function changes, unlike the History, which is a bounded window of recent Readings.
+_Avoid_: Logging (except for the CLI's `log` subcommand), capture
 
 ### Taking readings
 
@@ -127,7 +135,13 @@ _Avoid_: Link, session (in UI)
 
 **Backend**:
 The VISA implementation carrying a Connection: the vendor VISA library (Keysight/NI) or pyvisa-py.
-_Avoid_: Driver, library
+_Avoid_: Driver (for this meaning; see **Driver** below), library
+
+**Transport**:
+The text channel to one Meter that a Connection provides: write a command, read a reply, clear, close. The Simulator is a Transport too, which is how everything above it is tested without a Meter.
+
+**Driver**:
+The application's own code that speaks SCPI to the Meter over a Transport: it identifies the Meter, reads and applies a Setup, takes Readings and drains the error queue. It is not a Backend, which is the VISA implementation underneath the Transport.
 
 **Framing**:
 The RS-232 character format: data bits, parity and stop bits together.

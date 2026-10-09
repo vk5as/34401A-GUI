@@ -2,6 +2,7 @@
 
 import queue
 from collections.abc import Callable, Iterator
+from typing import TypeVar
 
 import pytest
 
@@ -14,8 +15,9 @@ from agilent34401a.meter import Function, Setup
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
 from agilent34401a.sim_server import SimulatorServer
 from agilent34401a.transport import Transport
+from agilent34401a.trigger import TriggerSettings, TriggerSource
 from agilent34401a.visa import check_library
-from agilent34401a.worker import Connected, Disconnected, Event, ReadingTaken, Worker
+from agilent34401a.worker import BurstFailed, BurstFinished, Connected, Disconnected, Event, ReadingTaken, Worker
 
 TIMEOUT_S = 10.0
 
@@ -208,6 +210,20 @@ def test_the_cli_changes_function_and_range_over_the_real_stack(server, capsys):
     assert capsys.readouterr().out == "1.000000 kΩ\n"
 
 
+def test_a_setup_saved_with_the_cli_is_still_in_the_meter_for_a_later_recall_over_the_real_stack(server, capsys):
+    connection = ["--backend", "py", "--resource", server.resource_name]
+    assert main(["read", *connection, "--function", "res", "--range", "1000"]) == 0
+    assert main(["save", "2", *connection]) == 0
+    assert main(["read", *connection, "--function", "dcv", "--range", "10"]) == 0
+    capsys.readouterr()
+
+    assert main(["recall", "2", *connection]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("Recalled Meter Memory location 2: 2-wire Ω")
+    assert "1 kΩ range" in out
+
+
 def test_the_cli_reports_a_meter_that_refuses_a_setting_over_the_real_stack(server, capsys):
     assert (
         main(["read", "--backend", "py", "--resource", server.resource_name, "--function", "dcv", "--range", "5000"])
@@ -223,3 +239,34 @@ def test_the_cli_reports_a_connection_that_cannot_be_made(unused_port, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.startswith("agilent34401a-cli: error:")
+
+
+def test_a_burst_runs_over_the_wire_and_a_raw_socket_cannot_wait_for_an_external_trigger(open_meter):
+    events: queue.Queue[Event] = queue.Queue()
+    transport = open_meter()
+    worker = Worker(lambda: transport, events)
+    worker.start()
+    try:
+        connected = events.get(timeout=TIMEOUT_S)
+        assert isinstance(connected, Connected)
+        assert not connected.supports_device_clear  # the simulator's server is a raw socket
+
+        worker.start_burst(TriggerSettings(sample_count=20))
+        finished = _until(events, BurstFinished)
+        assert len(finished.readings) == 20
+        assert finished.readings[0].reading.value == pytest.approx(1.0)
+
+        worker.start_burst(TriggerSettings(source=TriggerSource.EXTERNAL, sample_count=2))
+        assert "device clear" in _until(events, BurstFailed).message
+    finally:
+        assert worker.shutdown()
+
+
+_EventT = TypeVar("_EventT")
+
+
+def _until(events: "queue.Queue[Event]", kind: type[_EventT]) -> _EventT:
+    while True:
+        event = events.get(timeout=TIMEOUT_S)
+        if isinstance(event, kind):
+            return event

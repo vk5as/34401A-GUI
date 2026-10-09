@@ -1,11 +1,12 @@
+import warnings
 from typing import TYPE_CHECKING
 
 import pytest
 from pyvisa import constants
 from pyvisa.errors import VisaIOError
 
-from agilent34401a.errors import BackendUnavailableError, TransportError, TransportTimeoutError
-from agilent34401a.visa import VisaTransport, check_library, open_visa_transport
+from agilent34401a.errors import BackendUnavailableError, MalformedReplyError, TransportError, TransportTimeoutError
+from agilent34401a.visa import VisaTransport, check_library, list_resources, open_visa_transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -336,3 +337,161 @@ def test_timeouts_are_whole_milliseconds():
 
     assert resource.timeout == 300
     assert isinstance(resource.timeout, int)
+
+
+class GpibFakeResource(FakeResource):
+    """A resource on a GPIB interface, which can address the Meter to Local with the REN line."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ren_operations: list[constants.RENLineOperation] = []
+
+    def control_ren(self, mode: constants.RENLineOperation) -> None:
+        if "control_ren" in self.fail_on:
+            raise self.fail_on["control_ren"]
+        self.ren_operations.append(mode)
+
+
+def test_going_to_local_over_gpib_addresses_the_meter_to_go_to_local():
+    resource = GpibFakeResource()
+    transport = VisaTransport(resource, FakeManager(), gpib=True)
+
+    transport.go_to_local()
+
+    assert resource.ren_operations == [constants.RENLineOperation.address_gtl]
+
+
+def test_going_to_local_on_a_bus_that_is_not_gpib_does_nothing():
+    resource = GpibFakeResource()  # pyvisa gives every message-based resource control_ren, but only GPIB has the line
+    transport = VisaTransport(resource, FakeManager())
+
+    transport.go_to_local()
+
+    assert resource.ren_operations == []
+    assert resource.written == []
+
+
+def test_a_failure_while_going_to_local_becomes_a_transport_error():
+    resource = GpibFakeResource()
+    resource.fail_on["control_ren"] = VisaIOError(constants.StatusCode.error_connection_lost)
+    transport = VisaTransport(resource, FakeManager(), gpib=True)
+
+    with pytest.raises(TransportError):
+        transport.go_to_local()
+
+
+def test_a_closed_transport_cannot_go_to_local():
+    transport = VisaTransport(GpibFakeResource(), FakeManager(), gpib=True)
+    transport.close()
+
+    with pytest.raises(TransportError, match="closed"):
+        transport.go_to_local()
+
+
+def test_listing_resources_through_pyvisa_returns_their_names_and_releases_the_manager(monkeypatch):
+    class Lister(FakeManager):
+        def list_resources(self) -> tuple[str, ...]:
+            return ("GPIB0::22::INSTR", "ASRL1::INSTR")
+
+    manager = Lister()
+    monkeypatch.setattr("pyvisa.ResourceManager", lambda _library: manager)
+
+    assert list_resources("@py") == ["GPIB0::22::INSTR", "ASRL1::INSTR"]
+    assert manager.closed == 1
+
+
+def test_pyvisa_pys_psutil_hint_does_not_turn_a_scan_into_a_warning(monkeypatch):
+    class Chatty(FakeManager):
+        def list_resources(self) -> tuple[str, ...]:
+            warnings.warn(
+                "TCPIP:instr resource discovery is limited to the default interface.", UserWarning, stacklevel=1
+            )
+            return ("GPIB0::22::INSTR",)
+
+    monkeypatch.setattr("pyvisa.ResourceManager", lambda _library: Chatty())
+
+    assert list_resources("@py") == ["GPIB0::22::INSTR"]  # the suite turns any warning that escapes into an error
+
+
+def test_listing_resources_through_a_library_that_will_not_load_is_a_backend_unavailable_error():
+    with pytest.raises(BackendUnavailableError):
+        list_resources("@no-such-backend")
+
+
+def test_a_listing_that_fails_is_a_transport_error_and_still_releases_the_manager(monkeypatch):
+    class Failing(FakeManager):
+        def list_resources(self) -> tuple[str, ...]:
+            raise VisaIOError(constants.StatusCode.error_system_error)
+
+    manager = Failing()
+    monkeypatch.setattr("pyvisa.ResourceManager", lambda _library: manager)
+
+    with pytest.raises(TransportError):
+        list_resources("@py")
+
+    assert manager.closed == 1
+
+
+def test_a_reply_that_is_not_text_is_a_malformed_reply_not_a_crash():
+    transport, resource, _ = make()
+    resource.replies = [UnicodeDecodeError("ascii", b"\xe2", 0, 1, "ordinal not in range(128)")]
+
+    with pytest.raises(MalformedReplyError, match="text"):
+        transport.read()
+
+
+def test_clearing_a_socket_reads_what_is_left_over_instead_of_asking_pyvisa_py_to_clear():
+    # pyvisa-py's own clear() never returns on a socket the other end has closed.
+    resource, manager = FakeResource(), FakeManager()
+    transport = VisaTransport(resource, manager, socket=True)
+    transport.timeout = 1.5
+    resource.replies = [
+        "stale",
+        UnicodeDecodeError("ascii", b"\xe2", 0, 1, "ordinal not in range(128)"),
+        "more stale",
+        VisaIOError(constants.StatusCode.error_timeout),
+        "never reached",
+    ]
+
+    transport.clear()
+
+    assert resource.cleared == 0
+    assert resource.replies == ["never reached"]
+    assert transport.timeout == 1.5
+
+
+def test_clearing_a_socket_gives_up_on_a_reply_that_never_stops():
+    resource, manager = FakeResource(), FakeManager()
+    transport = VisaTransport(resource, manager, socket=True)
+    resource.replies = ["again"] * 10_000
+
+    transport.clear()
+
+    assert len(resource.replies) > 0
+
+
+def test_clearing_a_socket_reports_a_connection_that_failed():
+    resource, manager = FakeResource(), FakeManager()
+    transport = VisaTransport(resource, manager, socket=True)
+    resource.fail_on["read"] = VisaIOError(constants.StatusCode.error_connection_lost)
+
+    with pytest.raises(TransportError):
+        transport.clear()
+    assert transport.timeout == 2.0
+
+
+def test_a_socket_resource_is_recognised_by_its_name(monkeypatch):
+    opened = FakeResource()
+    _manager_opening(monkeypatch, lambda _name: opened)
+    monkeypatch.setattr("agilent34401a.visa.MessageBasedResource", FakeResource)
+
+    transport = open_visa_transport("@py", "TCPIP::127.0.0.1::5025::SOCKET")
+    opened.replies = [VisaIOError(constants.StatusCode.error_timeout)]
+    transport.clear()
+
+    assert opened.cleared == 0
+
+
+def test_a_transport_can_send_a_device_clear_unless_it_is_a_raw_socket():
+    assert VisaTransport(FakeResource(), FakeManager()).supports_device_clear
+    assert not VisaTransport(FakeResource(), FakeManager(), socket=True).supports_device_clear

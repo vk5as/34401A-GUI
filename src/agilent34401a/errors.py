@@ -13,6 +13,14 @@ class TransportTimeoutError(TransportError):
     """The Meter did not answer within the Transport's timeout."""
 
 
+class ResyncFailedError(TransportError):
+    """The Meter did not answer when the Connection was resynchronised, so it is not in step and cannot be brought back."""
+
+
+class RepeatedFailureError(TransportError):
+    """Replies were lost or garbled too many times in a row for the Connection to be worth keeping."""
+
+
 class BackendUnavailableError(TransportError):
     """The VISA Backend asked for cannot be used, or no Backend can."""
 
@@ -27,3 +35,19 @@ class UnrecognisedIdentityError(MeterError):
 
 class InvalidSetupError(ValueError):
     """A Setup the Meter could never hold, such as a Range the Function does not have."""
+
+
+class CalibrationBlockedError(ValueError):
+    """A raw command would change the Meter's calibration, which is refused unless explicitly allowed (ADR-0006)."""
+
+
+class BurstTooLargeError(InvalidSetupError):
+    """A Burst would take more Readings than Reading Memory holds, so it is refused before anything is sent."""
+
+
+class BurstRefusedError(MeterError):
+    """The Meter would not start a Burst; the message is what its error queue said."""
+
+
+class PresetError(Exception):
+    """A Preset could not be read, stored, found or written; the message says which Preset and why."""

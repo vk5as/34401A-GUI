@@ -649,3 +649,68 @@ def test_commands_that_have_no_answer_leave_no_reply_waiting(command):
     simulator.write(command)
 
     assert not _has_reply(simulator)
+
+
+def _is_remote(simulator: Simulator) -> bool:
+    return simulator.remote  # a function, so the type checker does not assume the answer cannot change
+
+
+def test_the_simulator_is_in_local_until_it_is_commanded_and_goes_remote_on_the_first_command():
+    simulator = Simulator()
+    assert not _is_remote(simulator)
+
+    simulator.query("*IDN?")
+
+    assert _is_remote(simulator)
+
+
+def test_the_local_command_returns_the_simulator_to_local_and_the_remote_command_to_remote():
+    simulator = Simulator()
+    simulator.write("SYST:REM")
+    assert _is_remote(simulator)
+
+    simulator.write("SYST:LOC")
+    assert not _is_remote(simulator)
+
+    simulator.write("SYST:REM")
+    assert _is_remote(simulator)
+
+
+def test_going_to_local_returns_the_simulator_to_local_without_touching_its_setup():
+    simulator = Simulator()
+    simulator.write('FUNC "RES"')
+
+    simulator.go_to_local()
+
+    assert not _is_remote(simulator)
+    assert simulator.query("FUNC?") == '"RES"'
+
+
+def test_going_to_local_does_not_end_a_lockout_that_somebody_else_must_release():
+    """On GPIB, GTL alone leaves the local lockout in force: only REN dropping (or SYST:LOC on RS-232) ends it."""
+    simulator = Simulator()
+    simulator.write("SYST:RWL")
+    assert simulator.front_panel_locked
+
+    simulator.go_to_local()
+
+    assert simulator.front_panel_locked
+    assert not _is_remote(simulator)
+
+
+def test_the_local_command_ends_a_lockout_and_goes_to_local():
+    simulator = Simulator()
+    simulator.write("SYST:RWL")
+
+    simulator.write("SYST:LOC")
+
+    assert not simulator.front_panel_locked
+    assert not _is_remote(simulator)
+
+
+def test_going_to_local_on_a_closed_simulator_is_refused_like_any_command():
+    simulator = Simulator()
+    simulator.close()
+
+    with pytest.raises(TransportError):
+        simulator.go_to_local()

@@ -6,14 +6,21 @@ from collections.abc import Callable, Iterator
 import pytest
 
 from agilent34401a.errors import TransportError, TransportTimeoutError
+from agilent34401a.math_operations import MathOperation, MathSettings
+from agilent34401a.meter import Function, Setup
 from agilent34401a.sim import Simulator
+from agilent34401a.trigger import TriggerSettings
 from agilent34401a.worker import (
+    BurstFailed,
+    BurstFinished,
     Connected,
     ConnectionLost,
     Disconnected,
     Event,
     ReadingFailed,
     ReadingTaken,
+    SetupChanged,
+    StatisticsRead,
     Worker,
     WorkerFailed,
 )
@@ -29,6 +36,7 @@ class FaultySimulator(Simulator):
         super().__init__(**kwargs)
         self.on_query: Callable[[str, int], str | None] = lambda _command, _count: None
         self.queries: list[str] = []
+        self.sent: list[str] = []  # everything written, which includes the sentinel a resynchronisation sends
         self.clears = 0
         self.closed_by_worker = False
         self.silent = False  # the Meter takes in everything and answers nothing
@@ -44,6 +52,7 @@ class FaultySimulator(Simulator):
         return super().query(command) if reply is None else reply
 
     def write(self, command: str) -> None:
+        self.sent.append(command)
         if self.write_error is not None:
             raise self.write_error
         if not self.silent:
@@ -66,6 +75,11 @@ class FaultySimulator(Simulator):
     def late_reply(self, reply: str) -> None:
         """A reply that arrives after the client gave up waiting for it."""
         self._reply(reply)
+
+
+def resynchronised(simulator: FaultySimulator) -> bool:
+    """Whether the Worker asked the sentinel again after connecting, which is what resynchronising does."""
+    return simulator.sent.count("*IDN?") > 1
 
 
 def timing_out(simulator: FaultySimulator, command: str, on: set[int], *, late: str | None = None) -> None:
@@ -284,3 +298,75 @@ def test_even_a_bug_in_the_worker_itself_is_reported_before_its_thread_ends(idle
     assert "bug" in failed.message
     assert worker.shutdown() is True
     assert worker.is_alive() is False
+
+
+# --- the paths that used to clear the Connection without resynchronising it (R7) ------------------------------
+
+
+def test_a_lost_statistics_reply_is_resynchronised_so_its_late_answer_is_not_taken_for_the_next(idle_worker):
+    worker, events = idle_worker()
+    simulator = FaultySimulator()
+    timing_out(simulator, "CALC:AVER:MIN?", {1}, late=STALE)
+    connect(worker, events, simulator)
+    statistics = Setup.default(Function.DC_VOLTAGE).with_math(MathSettings(operation=MathOperation.STATISTICS))
+    worker.apply_setup(statistics)
+    assert isinstance(next_event(events), SetupChanged)
+
+    worker.start_continuous()
+    seen = collect_until(events, lambda event: isinstance(event, StatisticsRead))
+    seen += [next_event(events) for _ in range(4)]
+
+    assert any(isinstance(event, ReadingFailed) for event in seen)
+    assert resynchronised(simulator)
+    values = [event.reading.value for event in seen if isinstance(event, ReadingTaken)]
+    assert values == [1.0] * len(values)  # never the stale 99.9 that was left on the line
+
+
+def test_a_burst_that_could_not_be_started_resynchronises_the_connection(idle_worker):
+    worker, events = idle_worker()
+    simulator = FaultySimulator()
+    timing_out(simulator, "SYST:ERR?", {1}, late=STALE)
+    connect(worker, events, simulator)
+
+    worker.start_burst(TriggerSettings(sample_count=3))
+    failed = next_event(events)
+
+    assert isinstance(failed, BurstFailed)
+    assert resynchronised(simulator)
+
+
+def test_a_burst_that_fails_while_it_runs_resynchronises_the_connection(idle_worker):
+    worker, events = idle_worker()
+    simulator = FaultySimulator()
+    timing_out(simulator, "FETC?", {1}, late=STALE)
+    connect(worker, events, simulator)
+
+    worker.start_burst(TriggerSettings(sample_count=3))
+    seen = collect_until(events, lambda event: isinstance(event, BurstFailed))
+
+    assert isinstance(seen[-1], BurstFailed)
+    assert resynchronised(simulator)
+
+
+def test_failing_to_put_the_trigger_settings_back_after_a_burst_resynchronises_the_connection(idle_worker):
+    worker, events = idle_worker()
+    simulator = FaultySimulator()
+    timing_out(simulator, "SYST:ERR?", {3}, late=STALE)  # the check after the Burst has been taken
+    connect(worker, events, simulator)
+
+    worker.start_burst(TriggerSettings(sample_count=3))
+    collect_until(events, lambda event: isinstance(event, BurstFinished))
+
+    assert resynchronised(simulator)
+
+
+def test_the_timeout_after_a_burst_comes_from_the_worker_s_own_timeout_rule(idle_worker):
+    worker, events = idle_worker(reading_timeout=lambda _setup: 3.5)
+    simulator = FaultySimulator()
+    connect(worker, events, simulator)
+    simulator.timeout = 1.0
+
+    worker.start_burst(TriggerSettings(sample_count=3))
+    collect_until(events, lambda event: isinstance(event, BurstFinished))
+
+    assert simulator.timeout == 3.5

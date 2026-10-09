@@ -670,7 +670,7 @@ class Worker:
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Lost the Statistics, resynchronising the Connection: %s", error)
             self._events.put(ReadingFailed(f"Statistics lost: {error}"))
-            transport.clear()
+            self._recover(transport, error)
             return
         self._events.put(StatisticsRead(statistics))
 
@@ -689,26 +689,31 @@ class Worker:
             return None
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not start a Burst, resynchronising the Connection: %s", error)
-            transport.clear()
             self._events.put(BurstFailed(f"The Burst could not be started: {error}"))
+            self._recover(transport, error)
             return None
         self._events.put(BurstStarted(trigger, burst.expected_readings, trigger.source is TriggerSource.EXTERNAL))
         started_at, wall_started_at = time.monotonic(), self._wall_clock()
         cancelled, ended, failure, readings = self._complete_burst(driver, burst)
-        if cancelled or failure is not None:
+        if cancelled:
             transport.clear()  # a device clear: the Meter stops waiting for triggers and returns to idle
+        elif failure is not None:
+            self._recover(transport, failure)  # the clear that stops the Meter waiting, then the sentinel
         errors = self._finish_burst(driver, transport, burst)
         if cancelled:
             self._events.put(BurstCancelled())
         elif failure is not None:
             self._events.put(BurstFailed(f"The Burst failed: {failure}"))
         else:
+            self._failures = 0
             self._report_burst(burst, readings, started_at, wall_started_at)
         if errors:
             self._events.put(ErrorsReported(tuple(errors)))
         return ended
 
-    def _complete_burst(self, driver: Driver, burst: Burst) -> tuple[bool, _Request | None, str | None, list[Reading]]:
+    def _complete_burst(
+        self, driver: Driver, burst: Burst
+    ) -> tuple[bool, _Request | None, MalformedReplyError | TransportTimeoutError | None, list[Reading]]:
         """Wait for the Burst and fetch it; return whether it was cancelled, by which request, why it failed, and what it took."""
         try:
             plan = plan_burst(burst.setup)
@@ -720,7 +725,7 @@ class Worker:
             return cancelled, ended, None, [] if cancelled else driver.fetch_burst(burst)
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("A Burst failed, resynchronising the Connection: %s", error)
-            return False, None, str(error), []
+            return False, None, error, []
 
     def _report_burst(
         self, burst: Burst, readings: list[Reading], started_at: float, wall_started_at: datetime
@@ -767,9 +772,9 @@ class Worker:
             errors = driver.finish_burst(burst)
         except (MalformedReplyError, TransportTimeoutError) as error:
             _LOG.warning("Could not restore the trigger settings after a Burst: %s", error)
-            transport.clear()
+            self._recover(transport, error)
             return []
-        transport.timeout = reading_timeout(driver.setup)
+        transport.timeout = self._timeout_for(driver.setup)
         return errors
 
     def _send_raw(self, driver: Driver, transport: Transport, command: str, *, allow_calibration: bool) -> None:

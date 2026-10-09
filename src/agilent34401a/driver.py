@@ -44,6 +44,10 @@ _ERROR_QUEUE_STATUS_BIT = 4  # bit 2 of the status byte: the error queue is not 
 _EVENT_SUMMARY_STATUS_BIT = 32  # bit 5 of the status byte: with *ESE 1, operation complete
 _QUOTED = 2  # a quoted string is at least its two quotes
 _INFINITE_COUNT = 9.9e37  # how the Meter says infinite when asked for its Trigger Count
+STORE_LOCATIONS = range(1, 4)
+"""The Meter Memory locations a Setup can be stored in (location 0 is the Meter's own power-down state)."""
+RECALL_LOCATIONS = range(4)
+"""The Meter Memory locations a Setup can be recalled from."""
 _FETCH_BASE_TIMEOUT_S = 10.0
 _FETCH_TIMEOUT_PER_READING_S = 0.05  # 512 Readings of about 16 characters take several seconds at 9600 baud
 
@@ -241,6 +245,29 @@ class Driver:
         self._transport.write(f'FUNC "{function.value}"')
         self._setup = Setup.default(function)  # a stand-in until read_setup, so Readings carry the right Function
         return self.drain_errors()
+
+    def save_to_meter(self, location: int) -> list[QueuedError]:
+        """Store the Meter's whole Setup in its own Meter Memory (`*SAV`), then drain the error queue (ADR-0005).
+
+        `location` is 1 to 3, anything else raises `ValueError` before anything is sent. This overwrites what was
+        there, so it is only ever done on the user's request (ADR-0004).
+        """
+        _check_location(location, STORE_LOCATIONS)
+        self._transport.write(f"*SAV {location}")
+        return self.drain_errors()
+
+    def recall_from_meter(self, location: int) -> list[QueuedError]:
+        """Replace the Meter's Setup with the one in Meter Memory `location` (`*RCL`), then drain the error queue.
+
+        `location` is 0 (the power-down state) to 3, anything else raises `ValueError` before anything is sent. The
+        Setup the driver remembers is no longer right afterwards, so the caller must `read_setup` (ADR-0004: read it
+        back, never assume it).
+        """
+        _check_location(location, RECALL_LOCATIONS)
+        self._transport.write(f"*RCL {location}")
+        errors = self.drain_errors()
+        self._setup = Setup.default(self._setup.function)  # a stand-in until read_setup, as after select_function
+        return errors
 
     def read_setup(self) -> Setup:
         """Ask the Meter what it is measuring, without changing anything (ADR-0004)."""
@@ -670,6 +697,12 @@ class Driver:
             message = f"Meter replied {reply!r} to {query}, which is not a number"
             raise MalformedReplyError(message)
         return value
+
+
+def _check_location(location: int, allowed: range) -> None:
+    if location not in allowed:
+        message = f"Meter Memory location is {allowed.start} to {allowed[-1]}, not {location}"
+        raise ValueError(message)
 
 
 def _unquote(reply: str) -> str:

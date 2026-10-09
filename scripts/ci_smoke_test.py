@@ -7,6 +7,7 @@ non-zero if the window never shows a Reading, or if closing the window leaves th
 """
 
 import argparse
+import gc
 import importlib.resources
 import sys
 import time
@@ -40,22 +41,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         if problem is not None:
             sys.stderr.write(f"{problem}\n")
             return 1
-    root = tk.Tk()
-    window = MainWindow(root, lambda: Simulator(time_scale=0), "Simulator")
+    # As in the application (ADR-0008): the cycle collector must not get to finalise a Tk object on the Worker thread,
+    # so it is off while the window lives and the garbage is collected here, on the Tk thread, afterwards.
+    collector_was_on = gc.isenabled()
+    gc.disable()
     try:
-        deadline = time.monotonic() + _TIMEOUT_S
-        while window.readout.cget("text") == NO_READING:
-            if time.monotonic() > deadline:
-                sys.stderr.write(
-                    f"No Reading appeared within {_TIMEOUT_S:g} s: {window.status_connection.cget('text')}\n"
-                )
-                return 1
-            root.update()
-            time.sleep(0.01)
-        reading = window.readout.cget("text")
+        root = tk.Tk()
+        window = MainWindow(root, lambda: Simulator(time_scale=0), "Simulator")
+        try:
+            deadline = time.monotonic() + _TIMEOUT_S
+            while window.readout.cget("text") == NO_READING:
+                if time.monotonic() > deadline:
+                    sys.stderr.write(
+                        f"No Reading appeared within {_TIMEOUT_S:g} s: {window.status_connection.cget('text')}\n"
+                    )
+                    return 1
+                root.update()
+                time.sleep(0.01)
+            reading = window.readout.cget("text")
+        finally:
+            window.close()  # exercises the real shutdown path: the Worker stops and the Transport closes
+        worker_alive = window.worker_is_alive()
+        gc.collect()
     finally:
-        window.close()  # exercises the real shutdown path: the Worker stops and the Transport closes
-    if window.worker_is_alive():
+        if collector_was_on:
+            gc.enable()
+    if worker_alive:
         sys.stderr.write("The Worker was still running after the window closed\n")
         return 1
     sys.stdout.write(

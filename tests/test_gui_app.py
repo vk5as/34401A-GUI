@@ -869,6 +869,40 @@ def test_choosing_a_theme_in_the_view_menu_restyles_the_window_at_once_and_saves
         window.close()
 
 
+def _unwritable_settings(tmp_path) -> Settings:
+    """Settings whose folder cannot be made, because a file is in the way (true on every OS, whoever runs the test)."""
+    (tmp_path / "in-the-way").write_text("a file", encoding="utf-8")
+    return Settings.load(tmp_path / "in-the-way" / "folder")
+
+
+def test_a_theme_is_still_applied_when_the_settings_cannot_be_saved_and_the_status_bar_says_so(tk_root, tmp_path):
+    window = _window_with(tk_root, _unwritable_settings(tmp_path))
+    heard = []
+    try:
+        window.on_theme_changed(lambda palette: heard.append(palette.name))
+
+        window.set_theme(Theme.DARK)
+
+        assert heard == ["System", "Dark"]  # the callbacks (the chart's colours) still ran
+        assert str(window.root.cget("background")) == "#232629"
+        assert "Could not save the settings" in str(window.status_error.cget("text"))
+    finally:
+        window.close()
+
+
+def test_compact_mode_is_still_laid_out_when_the_settings_cannot_be_saved(tk_root, tmp_path):
+    window = _window_with(tk_root, _unwritable_settings(tmp_path))
+    try:
+        window.add_tab("Extra", ttk.Frame(window.notebook))
+
+        window.set_compact(compact=True)
+
+        assert not any(_shown(window.setup_label, window.raw_check, window.notebook))
+        assert "Could not save the settings" in str(window.status_error.cget("text"))
+    finally:
+        window.close()
+
+
 def test_a_callback_hears_the_palette_now_and_after_every_theme_change(make_window):
     window = make_window()
     heard = []

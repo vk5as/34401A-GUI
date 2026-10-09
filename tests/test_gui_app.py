@@ -17,6 +17,7 @@ from agilent34401a import __version__
 from agilent34401a.errors import TransportError
 from agilent34401a.gui import main_window as main_window_module
 from agilent34401a.gui.app import main
+from agilent34401a.gui.console import TITLE as CONSOLE_TITLE
 from agilent34401a.gui.main_window import NO_READING, MainWindow
 from agilent34401a.meter import Function, GateTime, Resolution
 from agilent34401a.settings import Settings, Theme
@@ -992,13 +993,15 @@ def test_keys_still_work_while_a_read_only_combobox_has_focus(make_window):
 
 
 def test_ctrl_shortcuts_work_even_in_a_text_field(make_window):
+    # The console's entry is where this matters (Ctrl+K opens the console from inside it), and it is a widget the
+    # window really shows. A bare Text packed below everything else is squeezed out of a small Windows screen,
+    # never mapped, and never receives the key.
     window = make_window()
     calls = []
     window.register_shortcut("Ctrl+J", "Test", lambda: calls.append("j"))
-    field = tk.Text(window.root)
-    field.pack()
+    window.show_tab(CONSOLE_TITLE)
 
-    press(field, "Control-Key-j")
+    press(window.console.entry, "Control-Key-j")
 
     assert calls == ["j"]
 

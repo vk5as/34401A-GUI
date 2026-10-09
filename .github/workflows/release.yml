@@ -26,6 +26,7 @@ jobs:
   preflight:
     name: Resolve the release tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
@@ -53,6 +54,7 @@ jobs:
   lint:
     name: Static analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -76,6 +78,7 @@ jobs:
   test-linux:
     name: Tests, Linux, Python 3.14
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -97,6 +100,7 @@ jobs:
   test-windows:
     name: Tests, Windows, Python 3.14
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -117,6 +121,7 @@ jobs:
     name: Build wheel and sdist
     needs: [preflight, lint, test-linux, test-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -145,6 +150,7 @@ jobs:
     name: Verify the wheel on Windows, Python ${{ matrix.python-version }}
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -186,6 +192,7 @@ jobs:
     # A run from another branch is a dry run of the gates; releases come from the default branch only.
     if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -235,6 +242,7 @@ jobs:
     if: false
     needs: [preflight, lint, test-linux, test-windows, build, verify-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: pypi
       url: https://pypi.org/project/agilent34401a/

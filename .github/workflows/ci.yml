@@ -12,6 +12,7 @@ jobs:
   lint:
     name: Static analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,6 +36,7 @@ jobs:
   test-linux:
     name: Tests, Linux, Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -60,6 +62,7 @@ jobs:
   test-windows:
     name: Tests, Windows, Python 3.14
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,6 +82,7 @@ jobs:
   build:
     name: Build wheel and sdist
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

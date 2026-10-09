@@ -1,3 +1,4 @@
+import _tkinter
 import gc
 import os
 import re
@@ -59,8 +60,49 @@ def pump(window: MainWindow, until: Callable[[], bool], timeout: float = TIMEOUT
     while not until():
         if time.monotonic() > deadline:
             pytest.fail("timed out waiting for the window")
-        window.root.update()
+        _bounded_update(window.root)
         time.sleep(0.002)
+
+
+_MAX_STEPS_PER_UPDATE = 50
+
+
+def _bounded_update(root: tk.Misc) -> None:
+    """Like `root.update()`, but gives up after a few steps instead of running until nothing at all is due.
+
+    `update()` does not return while timers and idle callbacks keep coming due, which they do when the window's
+    handling of a flood of Readings takes longer than its poll interval (slow runners, coverage on Python 3.11). The
+    test could then never look at its condition or its deadline again.
+    """
+    for _ in range(_MAX_STEPS_PER_UPDATE):
+        if not root.tk.dooneevent(_tkinter.DONT_WAIT):
+            return
+
+
+def test_pump_comes_back_to_check_its_condition_even_when_timers_keep_each_other_due(make_window):
+    """Tk's `update()` runs until nothing is due, so two timers that each outlast the other's period never let it return.
+
+    That is what happened under coverage on Python 3.11, where a tick of the window's event handling took longer than
+    its poll interval and the tests hung for good in `update()`. `pump` takes a bounded number of steps instead.
+    """
+    window = make_window()
+    ticks = 0
+    running = True
+
+    def slow_timer() -> None:
+        nonlocal ticks
+        time.sleep(0.03)  # longer than the 10 ms until the other timer is due again
+        ticks += 1
+        if running:
+            window.root.after(10, slow_timer)
+
+    try:
+        window.root.after(0, slow_timer)
+        window.root.after(0, slow_timer)
+
+        pump(window, lambda: ticks >= 6, timeout=10)
+    finally:
+        running = False
 
 
 def pump_for(window: MainWindow, seconds: float) -> None:

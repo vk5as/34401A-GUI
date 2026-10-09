@@ -130,17 +130,15 @@ def test_a_reset_meter_shows_an_automatic_delay_and_one_reading(make_window):
     assert state(tab(window).start_button) == "normal"
 
 
-def test_the_delay_can_be_fixed_and_the_trigger_count_infinite(make_window):
+def test_the_delay_can_be_fixed(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
     tab(window).delay_fixed_button.invoke()
     type_into(window, tab(window).delay_entry, "1.5")
-    tab(window).infinite_check.invoke()
 
     assert state(tab(window).delay_entry) == "normal"
-    assert state(tab(window).trigger_entry) == "disabled"
-    assert tab(window).settings == TriggerSettings(delay=1.5, trigger_count=None)
+    assert tab(window).settings == TriggerSettings(delay=1.5)
 
 
 # --- refusing bad settings before starting -------------------------------------------------------------------------
@@ -194,14 +192,24 @@ def test_a_delay_outside_zero_to_an_hour_disables_start(make_window):
     assert "Trigger Delay" in tab(window).tooltips["start"].text
 
 
-def test_an_infinite_trigger_count_cannot_be_a_burst(make_window):
+def test_there_is_no_control_that_offers_an_infinite_trigger_count(make_window):
+    window = make_window()
+
+    assert not hasattr(tab(window), "infinite_check")  # a Burst with one always fails, so it is not offered
+
+
+def test_an_infinite_trigger_count_a_preset_has_is_shown_and_cannot_be_a_burst(make_window):
     window = make_window()
     pump(window, lambda: connected(window))
 
-    tab(window).infinite_check.invoke()
+    tab(window).set_settings(TriggerSettings(trigger_count=None))
 
+    assert tab(window).trigger_entry.get() == "infinite"
+    assert tab(window).settings.trigger_count is None
     assert state(tab(window).start_button) == "disabled"
     assert "Trigger Count" in tab(window).tooltips["start"].text
+    type_into(window, tab(window).trigger_entry, "3")  # typing a number brings the Burst back
+    assert state(tab(window).start_button) == "normal"
 
 
 # --- Single ----------------------------------------------------------------------------------------------------------

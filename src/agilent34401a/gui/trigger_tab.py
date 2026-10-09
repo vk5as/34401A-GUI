@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 TITLE = "Trigger"
 _AUTOMATIC = "auto"
 _FIXED = "fixed"
+_INFINITE = "infinite"  # what the Trigger Count box says when the Meter's Trigger Count is infinite
 _NOT_CONNECTED = "Connect to a Meter first."
 _NO_DEVICE_CLEAR = (
     "This Connection is a raw socket, which cannot send the device clear that cancels a wait for an external "
@@ -102,7 +103,6 @@ class TriggerTab:
         self.delay_var = tk.StringVar(value="0")
         self.sample_count_var = tk.StringVar(value="1")
         self.trigger_count_var = tk.StringVar(value="1")
-        self.infinite_var = tk.BooleanVar(value=False)
         self.tooltips: dict[str, Tooltip] = {}
         self._traces: list[tuple[tk.Variable, str]] = []
         self.single_button = ttk.Button(single_parent, text="Single", command=self.single, state="disabled")
@@ -158,8 +158,7 @@ class TriggerTab:
         ttk.Label(frame, text="Trigger Count").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=4)
         self.trigger_entry = self._entry(frame, self.trigger_count_var)
         self.trigger_entry.grid(row=3, column=1, sticky="w")
-        self.infinite_check = ttk.Checkbutton(frame, text="Infinite", variable=self.infinite_var, command=self._changed)
-        self.infinite_check.grid(row=3, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(frame, text="triggers per Burst").grid(row=3, column=2, sticky="w", padx=(8, 0))
 
     def _entry(self, parent: tk.Misc, variable: tk.StringVar) -> ttk.Entry:
         entry = ttk.Entry(parent, textvariable=variable, width=_WIDTH)
@@ -195,7 +194,10 @@ class TriggerTab:
     def settings(self) -> TriggerSettings:
         """The trigger settings the controls hold. Raises `InvalidSetupError` if they are not a valid set."""
         delay = None if self.delay_mode_var.get() == _AUTOMATIC else _seconds(self.delay_var.get())
-        triggers = None if self.infinite_var.get() else _whole_number(self.trigger_count_var.get(), "Trigger Count")
+        typed = self.trigger_count_var.get()
+        # An infinite Trigger Count is only ever shown (the Meter has one, or a Preset did), never offered: a Burst
+        # cannot have it, because Reading Memory holds 512 Readings.
+        triggers = None if typed.strip() == _INFINITE else _whole_number(typed, "Trigger Count")
         return TriggerSettings(
             TriggerSource(self.source_var.get()),
             delay,
@@ -209,8 +211,7 @@ class TriggerTab:
         self.delay_mode_var.set(_AUTOMATIC if settings.delay is None else _FIXED)
         self.delay_var.set("0" if settings.delay is None else f"{settings.delay:g}")
         self.sample_count_var.set(str(settings.sample_count))
-        self.infinite_var.set(settings.trigger_count is None)
-        self.trigger_count_var.set("1" if settings.trigger_count is None else str(settings.trigger_count))
+        self.trigger_count_var.set(_INFINITE if settings.trigger_count is None else str(settings.trigger_count))
         self._sync()
 
     def _problem(self) -> str:
@@ -242,10 +243,9 @@ class TriggerTab:
             button.configure(state="normal" if idle and usable else "disabled")
         self.tooltips["external"].text = "" if self._supports_device_clear else _NO_DEVICE_CLEAR
         state = "normal" if idle else "disabled"
-        for widget in (self.delay_auto_button, self.delay_fixed_button, self.sample_entry, self.infinite_check):
+        for widget in (self.delay_auto_button, self.delay_fixed_button, self.sample_entry, self.trigger_entry):
             widget.configure(state=state)
         self.delay_entry.configure(state=state if self.delay_mode_var.get() == _FIXED else "disabled")
-        self.trigger_entry.configure(state=state if not self.infinite_var.get() else "disabled")
         self.start_button.configure(state="normal" if idle and not problem else "disabled")
         self.tooltips["start"].text = "" if idle and not problem else (problem if idle else self._unavailable_reason())
         self.cancel_button.configure(state="normal" if self._bursting else "disabled")

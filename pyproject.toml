@@ -55,6 +55,7 @@ dev = [
     "pytest-timeout>=2.3",
     "ruff>=0.16,<0.17",
     "twine>=5",
+    "vermin>=1.6",
 ]
 
 [project.urls]
@@ -110,11 +111,22 @@ ignore = [
     "PLR2004", # magic values are the point of assertions
     "S101",    # assert is how pytest tests are written
     "SLF001",  # tests may exercise private helpers
+    "TID251",  # tests of visa.py build pyvisa errors and constants
+]
+
+"src/agilent34401a/visa.py" = [
+    "TID251", # the one module allowed to import pyvisa (ADR-0007)
 ]
 
 "scripts/**" = [
     "INP001", # standalone scripts run directly, they are not a package
 ]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pyvisa".msg = "pyvisa is confined to src/agilent34401a/visa.py (ADR-0007); reach VISA through the Transport"
+"pyvisa.constants".msg = "pyvisa is confined to src/agilent34401a/visa.py (ADR-0007); reach VISA through the Transport"
+"pyvisa.errors".msg = "pyvisa is confined to src/agilent34401a/visa.py (ADR-0007); reach VISA through the Transport"
+"pyvisa.resources".msg = "pyvisa is confined to src/agilent34401a/visa.py (ADR-0007); reach VISA through the Transport"
 
 [tool.ruff.lint.isort]
 known-first-party = ["agilent34401a"]
@@ -138,6 +150,9 @@ exclude_dirs = ["tests", ".venv"]
 [tool.pytest.ini_options]
 minversion = "8"
 testpaths = ["tests"]
+# Import the package from this checkout's src/, never from wherever the editable install points; a git worktree
+# would otherwise silently test the main checkout's code.
+pythonpath = ["src"]
 addopts = "-ra --strict-markers --strict-config --cov --cov-report=term-missing"
 filterwarnings = ["error"]
 # A hang must fail the job in minutes with every thread's stack, not block it for an hour. The slowest test takes a

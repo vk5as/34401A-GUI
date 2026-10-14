@@ -35,7 +35,7 @@ class Parity(Enum):
 
 
 class FlowControl(Enum):
-    """The RS-232 handshaking method."""
+    """The RS-232 Flow Control method."""
 
     NONE = "none"
     XON_XOFF = "xonxoff"

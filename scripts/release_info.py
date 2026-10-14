@@ -14,7 +14,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-import tomllib
+import tomllib  # novermin - this script runs only in the Release workflow, on Python 3.14
 
 _PACKAGE = "agilent34401a"
 _DEFAULT_PYPROJECT = Path("pyproject.toml")

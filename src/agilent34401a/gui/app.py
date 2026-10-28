@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the GUI's command line: the same Connection options as the CLI, none of which is required."""
     parser = argparse.ArgumentParser(
         prog="agilent34401a-gui",
-        description="Graphical remote control for the Agilent/HP 34401A digital multimeter. "
+        description="Graphical remote control for the Agilent/HP 34401A. "
         "Without Connection options the window starts with the connection dialog.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

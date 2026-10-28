@@ -30,7 +30,7 @@ class MalformedReplyError(MeterError):
 
 
 class UnrecognisedIdentityError(MeterError):
-    """The device that answered `*IDN?` is not a 34401A."""
+    """The Meter that answered `*IDN?` is not a 34401A."""
 
 
 class InvalidSetupError(ValueError):

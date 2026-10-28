@@ -14,6 +14,7 @@ from typing import Any
 
 from agilent34401a.backend import Backend
 from agilent34401a.connection import ConnectionSettings
+from agilent34401a.history import DEFAULT_HISTORY_LENGTH
 from agilent34401a.serial_config import SerialSettings
 
 _LOG = logging.getLogger(__name__)
@@ -24,7 +25,6 @@ _VERSION = 1
 
 _MIN_HISTORY = 1
 _MAX_HISTORY = 1_000_000
-_DEFAULT_HISTORY = 10_000
 _MIN_ERROR_INTERVAL_S = 1.0
 _MAX_ERROR_INTERVAL_S = 3600.0
 _DEFAULT_ERROR_INTERVAL_S = 5.0
@@ -89,7 +89,7 @@ class Settings:
     chart_x_axis: XAxis = XAxis.TIME
     last_connection: LastConnection | None = None
     auto_reconnect: bool = False
-    _history_length: int = field(default=_DEFAULT_HISTORY, repr=False)
+    _history_length: int = field(default=DEFAULT_HISTORY_LENGTH, repr=False)
     _error_check_interval_s: float = field(default=_DEFAULT_ERROR_INTERVAL_S, repr=False)
 
     @property

@@ -11,8 +11,9 @@ from dataclasses import replace
 from tkinter import ttk
 
 from agilent34401a.errors import InvalidSetupError
+from agilent34401a.gui.tooltip import Tooltip
 from agilent34401a.math_operations import MathOperation, MeterStatistics, offset_that_nulls
-from agilent34401a.meter import Reading, Resolution, Setup, format_reading
+from agilent34401a.meter import Function, Reading, Resolution, Setup, format_reading
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
@@ -30,6 +31,9 @@ HINT = (
     "Changing the Function turns the Operation off."
 )
 NO_MATH_NOTE = "Continuity and Diode have no Math Operations."
+DB_NOTE = "dB and dBm apply to AC voltage and DC voltage only."
+_NOT_CONNECTED = "Connect to a Meter first."
+_DB_CONTROLS = ("db", "dbm", "db_apply", "dbm_apply", "db_reference", "dbm_resistance")
 _OFF = "OFF"
 _STATISTICS = ("minimum", "maximum", "average", "count")
 _STATISTICS_TITLES = {"minimum": "Minimum", "maximum": "Maximum", "average": "Average", "count": "Count"}
@@ -42,6 +46,15 @@ def _ignore(_change: Callable[[Setup], Setup]) -> None:
 
 def _number_text(value: float) -> str:
     return f"{value:.10g}"
+
+
+def _db_reason(*, connected: bool, function: Function) -> str:
+    """Why the dB controls are off: no Connection, no Math on this Function, or a Function that is not a voltage."""
+    if not connected:
+        return _NOT_CONNECTED
+    if not function.has_math:
+        return NO_MATH_NOTE
+    return "" if function.has_decibels else DB_NOTE
 
 
 class MathTab:
@@ -72,6 +85,7 @@ class MathTab:
         self.hint_label.pack(anchor="w", pady=(0, 8))
         self.choice_buttons: dict[MathOperation | None, ttk.Radiobutton] = {}
         self.apply_buttons: dict[MathOperation, ttk.Button] = {}
+        self.tooltips: dict[str, Tooltip] = {}
         self._entries: list[ttk.Entry] = []
         self._unit_labels: list[ttk.Label] = []
         self._build_off()
@@ -140,13 +154,17 @@ class MathTab:
 
     def _build_db(self) -> None:
         row = self._row(MathOperation.DB, "dB")
+        self.tooltips["db"] = Tooltip(self.choice_buttons[MathOperation.DB], _NOT_CONNECTED)
         self.db_reference_entry = self._field(row, MathOperation.DB, "Relative to", "dBm")
-        self._apply_button(row, MathOperation.DB)
+        self.tooltips["db_reference"] = Tooltip(self.db_reference_entry, _NOT_CONNECTED)
+        self.tooltips["db_apply"] = Tooltip(self._apply_button(row, MathOperation.DB), _NOT_CONNECTED)
 
     def _build_dbm(self) -> None:
         row = self._row(MathOperation.DBM, "dBm")
+        self.tooltips["dbm"] = Tooltip(self.choice_buttons[MathOperation.DBM], _NOT_CONNECTED)
         self.dbm_resistance_entry = self._field(row, MathOperation.DBM, "Reference Resistance", "Ω")
-        self._apply_button(row, MathOperation.DBM)
+        self.tooltips["dbm_resistance"] = Tooltip(self.dbm_resistance_entry, _NOT_CONNECTED)
+        self.tooltips["dbm_apply"] = Tooltip(self._apply_button(row, MathOperation.DBM), _NOT_CONNECTED)
 
     def _build_statistics(self) -> None:
         row = self._row(MathOperation.STATISTICS, "Statistics")
@@ -269,6 +287,8 @@ class MathTab:
         for operation, apply_button in self.apply_buttons.items():
             applies = function.has_decibels or not operation.in_decibels
             apply_button.configure(state="normal" if usable and applies else "disabled")
+        for key in _DB_CONTROLS:
+            self.tooltips[key].text = _db_reason(connected=enabled, function=function)
         unit = function.unit
         self.null_unit.configure(text=unit)
         self.limit_unit.configure(text=unit)

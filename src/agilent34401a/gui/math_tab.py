@@ -21,6 +21,7 @@ from agilent34401a.worker import (
     Event,
     ReadingTaken,
     StatisticsRead,
+    WorkerFailed,
 )
 
 NOT_KNOWN = "—"
@@ -312,7 +313,7 @@ class MathTab:
             case StatisticsRead(statistics):
                 if self.selected is MathOperation.STATISTICS and self._setup is not None:
                     self._show_statistics(statistics, self._setup)
-            case Connected() | ConnectionFailed() | ConnectionLost() | Disconnected():
+            case Connected() | ConnectionFailed() | ConnectionLost() | WorkerFailed() | Disconnected():
                 self._latest = None
                 self._clear_statistics()
                 self._show_capture()

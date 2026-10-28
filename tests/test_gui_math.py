@@ -379,3 +379,34 @@ def test_the_limits_are_shown_back_from_the_meter(make_window):
     assert float(window.math_tab.limit_lower_entry.get()) == -1
     assert float(window.math_tab.limit_upper_entry.get()) == 1
     assert "Limit Test -1 V to 1 V" in str(window.setup_label.cget("text"))
+
+
+# --- when the Connection fails
+
+
+class ExplodingSimulator(CountingSimulator):
+    """A Simulator that dies on the next Reading once told to, so the Worker reports a failure."""
+
+    exploding = False
+
+    def query(self, command: str) -> str:
+        if command == "READ?" and self.exploding:
+            message = "boom"
+            raise RuntimeError(message)
+        return super().query(command)
+
+
+def test_a_worker_failure_clears_the_capture_and_the_statistics(make_window):
+    simulator = ExplodingSimulator(signals={Function.DC_VOLTAGE: 2.0})
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+    choose_operation(window, MathOperation.STATISTICS)
+    pump(window, lambda: statistic(window, "count") not in (NOT_KNOWN, "0"))
+    assert state(window.math_tab.capture_button) == "normal"
+
+    simulator.exploding = True
+    pump(window, lambda: str(window.status_connection.cget("text")).startswith("Failed"))
+
+    assert window.math_tab._latest is None
+    assert {statistic(window, name) for name in ("minimum", "maximum", "average", "count")} == {NOT_KNOWN}
+    assert state(window.math_tab.capture_button) == "disabled"

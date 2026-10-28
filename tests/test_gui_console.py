@@ -7,7 +7,7 @@ from agilent34401a.gui.console import ConsoleTab
 from agilent34401a.gui.main_window import MainWindow
 from agilent34401a.meter import Function
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
-from agilent34401a.worker import Disconnected
+from agilent34401a.worker import ConnectionLost, Disconnected
 from tests.test_gui_app import connected, press, pump
 
 
@@ -272,6 +272,16 @@ def test_the_console_is_disabled_again_when_the_connection_ends(make_window):
     window.console.handle_event(Disconnected())
 
     assert str(window.console.entry.cget("state")) == "disabled"
+
+
+def test_the_console_is_disabled_when_the_connection_is_lost(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+
+    window.console.handle_event(ConnectionLost("cable pulled"))
+
+    assert str(window.console.entry.cget("state")) == "disabled"
+    assert str(window.console.send_button.cget("state")) == "disabled"
 
 
 def test_ctrl_k_brings_up_the_console_from_anywhere_and_lists_as_available(make_window):

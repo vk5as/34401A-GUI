@@ -7,6 +7,7 @@ from agilent34401a.gui.system_tab import RESET_QUESTION, SELF_TEST_RUNNING, is_c
 from agilent34401a.meter import Function, Setup
 from agilent34401a.settings import Settings
 from agilent34401a.sim import AGILENT_IDENTITY, Simulator
+from agilent34401a.worker import ConnectionLost
 from tests.test_gui_app import pump, pump_for
 
 TIMEOUT_S = 10.0
@@ -270,6 +271,16 @@ def test_controls_are_disabled_when_the_connection_ends(make_window):
     window.worker.shutdown()
 
     pump(window, lambda: str(window.system_tab.reset_button.cget("state")) == "disabled")
+
+
+def test_controls_are_disabled_when_the_connection_is_lost(make_window):
+    window = open_system_tab(make_window)
+    assert str(window.system_tab.reset_button.cget("state")) == "normal"
+
+    window.system_tab.handle(ConnectionLost("cable pulled"))
+
+    assert str(window.system_tab.reset_button.cget("state")) == "disabled"
+    assert str(window.system_tab.self_test_button.cget("state")) == "disabled"
 
 
 def test_the_window_checks_for_meter_errors_at_the_interval_in_the_settings(tk_root):

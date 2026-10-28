@@ -12,6 +12,7 @@ from tkinter import ttk
 from agilent34401a.worker import (
     Connected,
     ConnectionFailed,
+    ConnectionLost,
     Disconnected,
     Event,
     RawFailed,
@@ -127,7 +128,7 @@ class ConsoleTab:
         match event:
             case Connected():
                 self._set_enabled(enabled=True)
-            case ConnectionFailed() | WorkerFailed() | Disconnected():
+            case ConnectionFailed() | ConnectionLost() | WorkerFailed() | Disconnected():
                 self._set_enabled(enabled=False)
             case RawReplied(_command, reply, errors):
                 if reply is not None:

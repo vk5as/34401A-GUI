@@ -61,19 +61,6 @@ _ERROR_QUEUE_SIZE = 20
 _LINE_BREAK = re.compile(r"[\r\n]")
 _ERROR_ENTRY = re.compile(r'\s*([+-]?\d+)\s*,\s*"(.*)"\s*')
 
-# The SCPI header each Function's Range and Integration Time commands start with. DC voltage ratio shares DC
-# voltage's, and frequency and period are ranged by their input voltage.
-_SETTING_PREFIX = {
-    Function.DC_VOLTAGE: "VOLT:DC",
-    Function.AC_VOLTAGE: "VOLT:AC",
-    Function.DC_CURRENT: "CURR:DC",
-    Function.AC_CURRENT: "CURR:AC",
-    Function.RESISTANCE_2W: "RES",
-    Function.RESISTANCE_4W: "FRES",
-    Function.FREQUENCY: "FREQ:VOLT",
-    Function.PERIOD: "PER:VOLT",
-    Function.DC_VOLTAGE_RATIO: "VOLT:DC",
-}
 # What `FUNC?` may answer; the Meter says "VOLT" for DC voltage, and the long forms are accepted too.
 _FUNCTION_ANSWERS = {
     "VOLT": Function.DC_VOLTAGE,
@@ -217,10 +204,10 @@ class Driver:
         write = self._transport.write
         write(f'FUNC "{function.value}"')
         if function.ranges:
-            prefix = _SETTING_PREFIX[function]
+            prefix = function.setting_prefix
             write(f"{prefix}:RANG:AUTO ON" if setup.range is None else f"{prefix}:RANG {setup.range:g}")
         if setup.nplc is not None:
-            write(f"{_SETTING_PREFIX[function]}:NPLC {setup.nplc:g}")
+            write(f"{function.setting_prefix}:NPLC {setup.nplc:g}")
         if setup.gate_time is not None:
             write(f"{function.value}:APER {setup.gate_time.seconds:g}")
         if setup.ac_filter is not None:
@@ -648,7 +635,7 @@ class Driver:
         return reply in ("1", "ON")
 
     def _read_range(self, function: Function) -> float | None:
-        prefix = _SETTING_PREFIX[function]
+        prefix = function.setting_prefix
         auto = self._transport.query(f"{prefix}:RANG:AUTO?").strip().upper()
         if auto in ("1", "ON"):
             return None
@@ -664,7 +651,7 @@ class Driver:
         raise MalformedReplyError(message)
 
     def _read_nplc(self, function: Function) -> float:
-        value = self._read_number(f"{_SETTING_PREFIX[function]}:NPLC?")
+        value = self._read_number(f"{function.setting_prefix}:NPLC?")
         for candidate in NPLC_VALUES:
             if math.isclose(value, candidate, rel_tol=1e-6):
                 return candidate

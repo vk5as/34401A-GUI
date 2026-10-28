@@ -160,6 +160,8 @@ class _FunctionSpec:
     has_ac_filter: bool = False
     has_gate_time: bool = False
     has_input_impedance: bool = False
+    setting_prefix: str = ""
+    """The SCPI header this Function's Range and Integration Time commands sit under."""
 
 
 class Function(Enum):
@@ -198,6 +200,15 @@ class Function(Enum):
     def range_unit(self) -> str:
         """The unit a Range is expressed in, which is the input's: frequency is ranged in volts."""
         return self._spec.range_unit
+
+    @property
+    def setting_prefix(self) -> str:
+        """The SCPI header this Function's Range and Integration Time commands sit under.
+
+        It is not always the Function's own SCPI name: frequency and period are ranged by their input voltage, and
+        DC voltage ratio shares DC voltage's header.
+        """
+        return self._spec.setting_prefix
 
     @property
     def has_integration_time(self) -> bool:
@@ -243,23 +254,51 @@ class Function(Enum):
 
 _SPECS = {
     Function.DC_VOLTAGE: _FunctionSpec(
-        "DC V", "V", _DC_VOLTAGE_RANGES, "V", has_integration_time=True, has_input_impedance=True
+        "DC V",
+        "V",
+        _DC_VOLTAGE_RANGES,
+        "V",
+        has_integration_time=True,
+        has_input_impedance=True,
+        setting_prefix="VOLT:DC",
     ),
     Function.AC_VOLTAGE: _FunctionSpec(
-        "AC V", "V", _AC_VOLTAGE_RANGES, "V", fixed_resolution=Resolution.SIX_HALF, has_ac_filter=True
+        "AC V",
+        "V",
+        _AC_VOLTAGE_RANGES,
+        "V",
+        fixed_resolution=Resolution.SIX_HALF,
+        has_ac_filter=True,
+        setting_prefix="VOLT:AC",
     ),
-    Function.DC_CURRENT: _FunctionSpec("DC I", "A", (0.01, 0.1, 1.0, 3.0), "A", has_integration_time=True),
+    Function.DC_CURRENT: _FunctionSpec(
+        "DC I", "A", (0.01, 0.1, 1.0, 3.0), "A", has_integration_time=True, setting_prefix="CURR:DC"
+    ),
     Function.AC_CURRENT: _FunctionSpec(
-        "AC I", "A", (1.0, 3.0), "A", fixed_resolution=Resolution.SIX_HALF, has_ac_filter=True
+        "AC I", "A", (1.0, 3.0), "A", fixed_resolution=Resolution.SIX_HALF, has_ac_filter=True, setting_prefix="CURR:AC"
     ),
-    Function.RESISTANCE_2W: _FunctionSpec("2-wire Ω", "Ω", _RESISTANCE_RANGES, "Ω", has_integration_time=True),
-    Function.RESISTANCE_4W: _FunctionSpec("4-wire Ω", "Ω", _RESISTANCE_RANGES, "Ω", has_integration_time=True),
-    Function.FREQUENCY: _FunctionSpec("Frequency", "Hz", _AC_VOLTAGE_RANGES, "V", has_gate_time=True),
-    Function.PERIOD: _FunctionSpec("Period", "s", _AC_VOLTAGE_RANGES, "V", has_gate_time=True),
+    Function.RESISTANCE_2W: _FunctionSpec(
+        "2-wire Ω", "Ω", _RESISTANCE_RANGES, "Ω", has_integration_time=True, setting_prefix="RES"
+    ),
+    Function.RESISTANCE_4W: _FunctionSpec(
+        "4-wire Ω", "Ω", _RESISTANCE_RANGES, "Ω", has_integration_time=True, setting_prefix="FRES"
+    ),
+    Function.FREQUENCY: _FunctionSpec(
+        "Frequency", "Hz", _AC_VOLTAGE_RANGES, "V", has_gate_time=True, setting_prefix="FREQ:VOLT"
+    ),
+    Function.PERIOD: _FunctionSpec(
+        "Period", "s", _AC_VOLTAGE_RANGES, "V", has_gate_time=True, setting_prefix="PER:VOLT"
+    ),
     Function.CONTINUITY: _FunctionSpec("Continuity", "Ω", (), "Ω", fixed_resolution=Resolution.FIVE_HALF),
     Function.DIODE: _FunctionSpec("Diode", "V", (), "V", fixed_resolution=Resolution.FIVE_HALF),
     Function.DC_VOLTAGE_RATIO: _FunctionSpec(
-        "DC V ratio", "", _DC_VOLTAGE_RANGES, "V", has_integration_time=True, uses_prefixes=False
+        "DC V ratio",
+        "",
+        _DC_VOLTAGE_RANGES,
+        "V",
+        has_integration_time=True,
+        uses_prefixes=False,
+        setting_prefix="VOLT:DC",
     ),
 }
 

@@ -114,6 +114,9 @@ class TriggerTab:
             for variable, name in self._traces:  # a trace holds the tab for as long as Tcl keeps it
                 variable.trace_remove("write", name)
             self._traces.clear()
+            # The StringVars go with it, freed here on the Tk thread rather than by the collector (ADR-0008).
+            for name in ("source_var", "delay_mode_var", "delay_var", "sample_count_var", "trigger_count_var"):
+                setattr(self, name, None)
 
     # --- building ----------------------------------------------------------------------------------------------
 

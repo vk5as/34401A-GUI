@@ -1,4 +1,4 @@
-"""Remote control for the Agilent/HP 34401A digital multimeter over GPIB or RS-232."""
+"""Remote control for the Agilent/HP 34401A over GPIB or RS-232."""
 
 import importlib.metadata
 

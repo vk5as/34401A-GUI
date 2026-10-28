@@ -39,7 +39,7 @@ _AUTO = "auto"
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=_PROG,
-        description="Remote control for the Agilent/HP 34401A digital multimeter.",
+        description="Remote control for the Agilent/HP 34401A",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(title="commands", dest="command")

@@ -163,7 +163,7 @@ class Driver:
             or fields[0].casefold() not in _MANUFACTURERS
             or fields[1].casefold() != _MODEL
         ):
-            message = f"Expected an Agilent/HP 34401A but the device identified as {raw.strip()!r}"
+            message = f"Expected an Agilent/HP 34401A but the Meter identified as {raw.strip()!r}"
             raise UnrecognisedIdentityError(message)
         manufacturer, model, serial, firmware = fields
         return Identity(manufacturer=manufacturer, model=model, serial=serial, firmware=firmware, raw=raw)

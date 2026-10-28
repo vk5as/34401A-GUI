@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agilent34401a"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tkinter GUI and CLI for remote-controlling an Agilent/HP 34401A digital multimeter over GPIB or RS-232"
 readme = "README.md"
 license = "MIT"

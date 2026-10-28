@@ -7,8 +7,8 @@ the Meter's Math, saved Presets, CSV recording, and a raw SCPI console.
 
 > This project was developed with the assistance of AI, using Claude Code. See [AI assistance](#ai-assistance).
 
-> Version 0.1.0, alpha. It is not on PyPI yet and has no release: install it from a checkout (see
-> [Installation](#installation)).
+> Version 0.1.1, alpha. It is not on PyPI yet: install it from a checkout or from the wheel attached to a release
+> (see [Installation](#installation)).
 
 ![The main window with the Chart tab: DC V, a live History of Readings and its statistics, connected to the Simulator](docs/images/theme_light.png)
 
@@ -34,10 +34,10 @@ installs for you, so the Simulator and RS-232 work without any vendor software. 
 on Windows needs the Keysight IO Libraries (below).
 
 The project is not on PyPI yet, so `pip install agilent34401a` does not work yet. Install from a checkout of this
-repository (next section), or, once a release exists, from the wheel attached to it:
+repository (next section), or from the wheel attached to a release:
 
 ```bash
-pip install agilent34401a-0.1.0-py3-none-any.whl
+pip install agilent34401a-0.1.1-py3-none-any.whl
 ```
 
 This installs three commands:

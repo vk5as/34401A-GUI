@@ -12,6 +12,10 @@ from agilent34401a.sim import Simulator
 from tests.test_gui_app import CountingSimulator, pump, pump_for, settle, shows_reading
 
 NOT_KNOWN = "—"
+NOT_CONNECTED = "Connect to a Meter first."
+NO_MATH_NOTE = "Continuity and Diode have no Math Operations."
+DB_NOTE = "dB and dBm apply to AC voltage and DC voltage only."
+DB_KEYS = ("db", "dbm", "db_apply", "dbm_apply", "db_reference", "dbm_resistance")
 
 
 def set_text(entry: ttk.Entry, text: str) -> None:
@@ -53,6 +57,47 @@ def test_the_math_controls_wait_for_the_connection(make_window):
     window = make_window()
 
     assert {state(button) for button in window.math_tab.choice_buttons.values()} == {"disabled"}
+    assert {tip.text for tip in window.math_tab.tooltips.values()} == {NOT_CONNECTED}
+
+
+@pytest.mark.parametrize("function", list(Function))
+def test_the_db_controls_say_why_they_are_off_for_the_function(make_window, function):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    if function is not Function.DC_VOLTAGE:
+        switch_to(window, function)
+    tab = window.math_tab
+    if function in (Function.DC_VOLTAGE, Function.AC_VOLTAGE):
+        reason = ""
+    elif function in (Function.CONTINUITY, Function.DIODE):
+        reason = NO_MATH_NOTE
+    else:
+        reason = DB_NOTE
+
+    assert {key: tab.tooltips[key].text for key in DB_KEYS} == dict.fromkeys(DB_KEYS, reason)
+    controls = (
+        tab.choice_buttons[MathOperation.DB],
+        tab.choice_buttons[MathOperation.DBM],
+        tab.apply_buttons[MathOperation.DB],
+        tab.apply_buttons[MathOperation.DBM],
+        tab.db_reference_entry,
+        tab.dbm_resistance_entry,
+    )
+    expected = {"normal"} if not reason else {"disabled"}
+    assert {state(control) for control in controls} == expected
+
+
+def test_a_disabled_db_control_shows_its_reason_under_the_button(make_window):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    switch_to(window, Function.DC_CURRENT)
+    tooltip = window.math_tab.tooltips["db_apply"]
+
+    tooltip.show()
+    window.root.update()
+    assert tooltip.window is not None
+    tooltip.hide()
+    assert tooltip.window is None
 
 
 def test_the_tab_says_only_one_math_operation_is_active_at_a_time(make_window):
@@ -379,3 +424,34 @@ def test_the_limits_are_shown_back_from_the_meter(make_window):
     assert float(window.math_tab.limit_lower_entry.get()) == -1
     assert float(window.math_tab.limit_upper_entry.get()) == 1
     assert "Limit Test -1 V to 1 V" in str(window.setup_label.cget("text"))
+
+
+# --- when the Connection fails
+
+
+class ExplodingSimulator(CountingSimulator):
+    """A Simulator that dies on the next Reading once told to, so the Worker reports a failure."""
+
+    exploding = False
+
+    def query(self, command: str) -> str:
+        if command == "READ?" and self.exploding:
+            message = "boom"
+            raise RuntimeError(message)
+        return super().query(command)
+
+
+def test_a_worker_failure_clears_the_capture_and_the_statistics(make_window):
+    simulator = ExplodingSimulator(signals={Function.DC_VOLTAGE: 2.0})
+    window = make_window(simulator)
+    pump(window, lambda: shows_reading(window))
+    choose_operation(window, MathOperation.STATISTICS)
+    pump(window, lambda: statistic(window, "count") not in (NOT_KNOWN, "0"))
+    assert state(window.math_tab.capture_button) == "normal"
+
+    simulator.exploding = True
+    pump(window, lambda: str(window.status_connection.cget("text")).startswith("Failed"))
+
+    assert window.math_tab._latest is None
+    assert {statistic(window, name) for name in ("minimum", "maximum", "average", "count")} == {NOT_KNOWN}
+    assert state(window.math_tab.capture_button) == "disabled"

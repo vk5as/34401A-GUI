@@ -11,6 +11,11 @@ from agilent34401a.sim import Simulator
 from tests.test_gui_app import CountingSimulator, choose, pump, shows_reading
 
 NOT_APPLICABLE = "—"
+NOT_CONNECTED = "Connect to a Meter first."
+AC_FILTER_NOTE = "AC Filter applies to AC voltage and AC current only."
+GATE_TIME_NOTE = "Gate Time applies to Frequency and Period only."
+AUTOZERO_NOTE = "Autozero applies to the Functions that integrate."
+IMPEDANCE_NOTE = "Input Impedance applies to DC voltage only."
 AC_FUNCTIONS = (Function.AC_VOLTAGE, Function.AC_CURRENT)
 COUNTER_FUNCTIONS = (Function.FREQUENCY, Function.PERIOD)
 AUTOZERO_FUNCTIONS = (
@@ -50,6 +55,7 @@ def test_the_sense_controls_wait_for_the_connection(make_window):
     window = make_window()
 
     assert [state(box) for box in sense_boxes(window)] == ["disabled"] * 4
+    assert {tip.text for tip in window.sense_tab.tooltips.values()} == {NOT_CONNECTED}
 
 
 @pytest.mark.parametrize("function", list(Function))
@@ -64,6 +70,35 @@ def test_each_sense_control_is_enabled_only_for_the_functions_it_applies_to(make
     assert (state(tab.gate_time_box) == "readonly") == (function in COUNTER_FUNCTIONS)
     assert (state(tab.autozero_box) == "readonly") == (function in AUTOZERO_FUNCTIONS)
     assert (state(tab.input_impedance_box) == "readonly") == (function is Function.DC_VOLTAGE)
+
+
+@pytest.mark.parametrize("function", list(Function))
+def test_a_sense_control_that_does_not_apply_to_the_function_says_why(make_window, function):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    if function is not Function.DC_VOLTAGE:
+        switch_to(window, function)
+    tab = window.sense_tab
+
+    expected = {
+        "ac_filter": "" if function in AC_FUNCTIONS else AC_FILTER_NOTE,
+        "gate_time": "" if function in COUNTER_FUNCTIONS else GATE_TIME_NOTE,
+        "autozero": "" if function in AUTOZERO_FUNCTIONS else AUTOZERO_NOTE,
+        "input_impedance": "" if function is Function.DC_VOLTAGE else IMPEDANCE_NOTE,
+    }
+    assert {name: tab.tooltips[name].text for name in expected} == expected
+
+
+def test_the_reason_for_a_disabled_sense_control_shows_under_the_box(make_window):
+    window = make_window()
+    pump(window, lambda: shows_reading(window))
+    tooltip = window.sense_tab.tooltips["gate_time"]
+
+    tooltip.show()
+    window.root.update()
+    assert tooltip.window is not None
+    tooltip.hide()
+    assert tooltip.window is None
 
 
 def test_a_control_that_does_not_apply_shows_a_dash(make_window):

@@ -393,6 +393,19 @@ def test_a_tooltip_shows_its_text_under_the_widget_and_goes_away(make_window):
     assert tooltip.window is None
 
 
+def test_closing_the_window_frees_the_trigger_tabs_string_vars_on_the_tk_thread(make_window):
+    window = make_window()
+    pump(window, lambda: connected(window))
+    trigger = tab(window)
+    names = ("source_var", "delay_mode_var", "delay_var", "sample_count_var", "trigger_count_var")
+    assert all(getattr(trigger, name) is not None for name in names)
+
+    window.close()
+
+    assert all(getattr(trigger, name) is None for name in names)
+    assert trigger._traces == []
+
+
 # --- export ----------------------------------------------------------------------------------------------------------
 
 

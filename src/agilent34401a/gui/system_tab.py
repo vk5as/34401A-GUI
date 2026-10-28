@@ -11,6 +11,7 @@ from agilent34401a.worker import (
     AdminFailed,
     Connected,
     ConnectionFailed,
+    ConnectionLost,
     Disconnected,
     ErrorsReported,
     Event,
@@ -220,7 +221,7 @@ class SystemTab(ttk.Frame):
                 self._handle_result(event)
             case ErrorsReported(errors):
                 self._add_to_log(errors)
-            case ConnectionFailed() | WorkerFailed() | Disconnected():
+            case ConnectionFailed() | ConnectionLost() | WorkerFailed() | Disconnected():
                 self._connected = False
                 self._self_testing = False
                 self._sync_controls()
